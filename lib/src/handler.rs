@@ -8,9 +8,9 @@ use http::Status;
 use outcome;
 
 /// Type alias for the `Outcome` of a `Handler`.
-pub type Outcome<'r> = outcome::Outcome<Response<'r>, Status, Data>;
+pub type Outcome = outcome::Outcome<Response, Status, Data>;
 
-impl<'r> Outcome<'r> {
+impl Outcome {
     /// Return the `Outcome` of response to `req` from `responder`.
     ///
     /// If the responder responds with `Ok`, an outcome of `Success` is returns
@@ -28,7 +28,7 @@ impl<'r> Outcome<'r> {
     /// }
     /// ```
     #[inline]
-    pub fn from<T: Responder<'r>>(req: &Request, responder: T) -> Outcome<'r> {
+    pub fn from<T: Responder>(req: &Request, responder: T) -> Outcome {
         match responder.respond_to(req) {
             Ok(response) => outcome::Outcome::Success(response),
             Err(status) => outcome::Outcome::Failure(status)
@@ -53,7 +53,7 @@ impl<'r> Outcome<'r> {
     /// }
     /// ```
     #[inline(always)]
-    pub fn failure(code: Status) -> Outcome<'static> {
+    pub fn failure(code: Status) -> Outcome {
         outcome::Outcome::Failure(code)
     }
 
@@ -69,18 +69,18 @@ impl<'r> Outcome<'r> {
     /// use rocket::{Request, Data};
     /// use rocket::handler::Outcome;
     ///
-    /// fn always_forward(_: &Request, data: Data) -> Outcome<'static> {
+    /// fn always_forward(_: &Request, data: Data) -> Outcome {
     ///     Outcome::forward(data)
     /// }
     /// ```
     #[inline(always)]
-    pub fn forward(data: Data) -> Outcome<'static> {
+    pub fn forward(data: Data) -> Outcome {
         outcome::Outcome::Forward(data)
     }
 }
 
 /// The type of a request handler.
-pub type Handler = for<'r> fn(&'r Request, Data) -> Outcome<'r>;
+pub type Handler = for<'r> fn(&'r Request, Data) -> Outcome;
 
 /// The type of an error handler.
-pub type ErrorHandler = for<'r> fn(Error, &'r Request) -> response::Result<'r>;
+pub type ErrorHandler = for<'r> fn(Error, &'r Request) -> response::Result;

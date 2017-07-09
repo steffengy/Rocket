@@ -256,7 +256,7 @@ fn generic_route_decorator(known_method: Option<Spanned<Method>>,
         // an `Error` associated type of !.
         #[allow(unreachable_code)]
         fn $route_fn_name<'_b>(__req: &'_b ::rocket::Request,  __data: ::rocket::Data)
-                -> ::rocket::handler::Outcome<'_b> {
+                -> ::rocket::handler::Outcome {
              $param_statements
              $query_statement
              $data_statement

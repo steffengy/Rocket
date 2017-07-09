@@ -43,8 +43,8 @@ impl<'h> Header<'h> {
     /// assert_eq!(header.to_string(), "X-Custom-Header: custom value");
     /// ```
     #[inline(always)]
-    pub fn new<'a: 'h, 'b: 'h, N, V>(name: N, value: V) -> Header<'h>
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>
+    pub fn new<'a, N, V>(name: N, value: V) -> Header<'a>
+        where N: Into<Cow<'a, str>>, V: Into<Cow<'a, str>>
     {
         Header {
             name: Uncased::new(name),
@@ -100,7 +100,7 @@ impl<'h> Header<'h> {
     }
 }
 
-impl<'h> fmt::Display for Header<'h> {
+impl<'a> fmt::Display for Header<'a> {
     #[inline(always)]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}: {}", self.name, self.value)
@@ -116,11 +116,11 @@ impl<'h> fmt::Display for Header<'h> {
 /// means that, for instance, a look for a header by the name of "aBC" will
 /// returns values for headers of names "AbC", "ABC", "abc", and so on.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub struct HeaderMap<'h> {
-    headers: OrderMap<Uncased<'h>, Vec<Cow<'h, str>>>
+pub struct HeaderMap {
+    headers: OrderMap<Uncased<'static>, Vec<Cow<'static, str>>>
 }
 
-impl<'h> HeaderMap<'h> {
+impl HeaderMap {
     /// Returns an empty collection.
     ///
     /// # Example
@@ -131,7 +131,7 @@ impl<'h> HeaderMap<'h> {
     /// let map = HeaderMap::new();
     /// ```
     #[inline(always)]
-    pub fn new() -> HeaderMap<'h> {
+    pub fn new() -> HeaderMap {
         HeaderMap { headers: OrderMap::new() }
     }
 
@@ -308,7 +308,7 @@ impl<'h> HeaderMap<'h> {
     /// assert_eq!(map.len(), 1);
     /// ```
     #[inline(always)]
-    pub fn replace<'p: 'h, H: Into<Header<'p>>>(&mut self, header: H) -> bool {
+    pub fn replace<H: Into<Header<'static>>>(&mut self, header: H) -> bool {
         let header = header.into();
         self.headers.insert(header.name, vec![header.value]).is_some()
     }
@@ -331,8 +331,8 @@ impl<'h> HeaderMap<'h> {
     /// assert_eq!(map.len(), 1);
     /// ```
     #[inline(always)]
-    pub fn replace_raw<'a: 'h, 'b: 'h, N, V>(&mut self, name: N, value: V) -> bool
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>
+    pub fn replace_raw<N, V>(&mut self, name: N, value: V) -> bool
+        where N: Into<Cow<'static, str>>, V: Into<Cow<'static, str>>
     {
         self.replace(Header::new(name, value))
     }
@@ -358,8 +358,8 @@ impl<'h> HeaderMap<'h> {
     /// assert_eq!(vals, vec!["value_3", "value_4"]);
     /// ```
     #[inline(always)]
-    pub fn replace_all<'n, 'v: 'h, H>(&mut self, name: H, values: Vec<Cow<'v, str>>)
-        where 'n: 'h, H: Into<Cow<'n, str>>
+    pub fn replace_all<H>(&mut self, name: H, values: Vec<Cow<'static, str>>)
+        where H: Into<Cow<'static, str>>
     {
         self.headers.insert(Uncased::new(name), values);
     }
@@ -379,7 +379,7 @@ impl<'h> HeaderMap<'h> {
     /// assert_eq!(map.get("Set-Cookie").count(), 2);
     /// ```
     #[inline(always)]
-    pub fn add<'p: 'h, H: Into<Header<'p>>>(&mut self, header: H) {
+    pub fn add<H: Into<Header<'static>>>(&mut self, header: H) {
         let header = header.into();
         self.headers.entry(header.name).or_insert(vec![]).push(header.value);
     }
@@ -402,8 +402,8 @@ impl<'h> HeaderMap<'h> {
     /// assert_eq!(values, vec!["value_1", "value_2"]);
     /// ```
     #[inline(always)]
-    pub fn add_raw<'a: 'h, 'b: 'h, N, V>(&mut self, name: N, value: V)
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>
+    pub fn add_raw<N, V>(&mut self, name: N, value: V)
+        where N: Into<Cow<'static, str>>, V: Into<Cow<'static, str>>
     {
         self.add(Header::new(name, value))
     }
@@ -433,8 +433,8 @@ impl<'h> HeaderMap<'h> {
     /// assert_eq!(values, vec!["value_1", "value_2", "value_3", "value_4"]);
     /// ```
     #[inline(always)]
-    pub fn add_all<'n, H>(&mut self, name: H, values: &mut Vec<Cow<'h, str>>)
-        where 'n:'h, H: Into<Cow<'n, str>>
+    pub fn add_all<H>(&mut self, name: H, values: &mut Vec<Cow<'static, str>>)
+        where H: Into<Cow<'static, str>>
     {
         self.headers.entry(Uncased::new(name))
             .or_insert(vec![])
@@ -498,7 +498,7 @@ impl<'h> HeaderMap<'h> {
     /// assert_eq!(expected_set, actual_set);
     /// ```
     #[inline(always)]
-    pub fn remove_all(&mut self) -> Vec<Header<'h>> {
+    pub fn remove_all(&mut self) -> Vec<Header> {
         let old_map = ::std::mem::replace(self, HeaderMap::new());
         old_map.into_iter().collect()
     }
@@ -584,7 +584,7 @@ impl<'h> HeaderMap<'h> {
     /// ```
     // TODO: Implement IntoIterator.
     #[inline(always)]
-    pub fn into_iter(self) -> impl Iterator<Item=Header<'h>> {
+    pub fn into_iter(self) -> impl Iterator<Item=Header<'static>> {
         self.headers.into_iter().flat_map(|(name, value)| {
             value.into_iter().map(move |value| {
                 Header {
@@ -600,7 +600,7 @@ impl<'h> HeaderMap<'h> {
     /// should likely not be used.
     #[inline]
     pub(crate) fn into_iter_raw(self)
-            -> impl Iterator<Item=(Uncased<'h>, Vec<Cow<'h, str>>)> {
+            -> impl Iterator<Item=(Uncased<'static>, Vec<Cow<'static, str>>)> {
         self.headers.into_iter()
     }
 }

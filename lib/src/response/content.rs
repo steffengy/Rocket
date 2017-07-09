@@ -46,9 +46,9 @@ pub struct Content<R>(pub ContentType, pub R);
 
 /// Overrides the Content-Type of the response to the wrapped `ContentType` then
 /// delegates the remainder of the response to the wrapped responder.
-impl<'r, R: Responder<'r>> Responder<'r> for Content<R> {
+impl<'r, R: Responder> Responder for Content<R> {
     #[inline(always)]
-    fn respond_to(self, req: &Request) -> Result<Response<'r>, Status> {
+    fn respond_to(self, req: &Request) -> Result<Response, Status> {
         Response::build()
             .merge(self.1.respond_to(req)?)
             .header(self.0)
@@ -71,8 +71,8 @@ macro_rules! ctrs {
 
             /// Sets the Content-Type of the response then delegates the
             /// remainder of the response to the wrapped responder.
-            impl<'r, R: Responder<'r>> Responder<'r> for $name<R> {
-                fn respond_to(self, req: &Request) -> Result<Response<'r>, Status> {
+            impl<R: Responder> Responder for $name<R> {
+                fn respond_to(self, req: &Request) -> Result<Response, Status> {
                     Content(ContentType::$name, self.0).respond_to(req)
                 }
             }

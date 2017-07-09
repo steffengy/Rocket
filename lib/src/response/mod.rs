@@ -40,4 +40,4 @@ pub use self::failure::Failure;
 #[doc(inline)] pub use self::content::Content;
 
 /// Type alias for the `Result` of a `Responder::respond` call.
-pub type Result<'r> = ::std::result::Result<self::Response<'r>, ::http::Status>;
+pub type Result = ::std::result::Result<self::Response, ::http::Status>;

@@ -191,12 +191,13 @@ impl<T: Borrow<Mime>> From<T> for ContentType {
 impl From<Mime> for ContentType {
     #[inline]
     fn from(mime: Mime) -> ContentType {
-        // soooo inneficient.
+        /*// soooo inneficient.
         let params = mime.2.into_iter()
             .map(|(attr, value)| (attr.to_string(), value.to_string()))
             .collect::<Vec<_>>();
 
-        ContentType::with_params(mime.0.to_string(), mime.1.to_string(), params)
+        ContentType::with_params(mime.0.to_string(), mime.1.to_string(), params)*/
+        unimplemented!()
     }
 }
 

@@ -490,21 +490,77 @@ impl Config {
     /// ```
     #[cfg(feature = "tls")]
     pub fn set_tls(&mut self, certs_path: &str, key_path: &str) -> Result<()> {
-        use hyper_rustls::util as tls;
-        use hyper_rustls::util::Error::Io;
+        use std::io::{self, BufReader};
+        use std::fs;
+        use rustls;
+        use rustls::internal::pemfile;
+        use rustls::sign::RSASigner;
+
+        // TODO: maybe also move this back to hyper-rustls?
+        #[derive(Debug)]
+        pub enum Error {
+            Io(io::Error),
+            BadCerts,
+            BadKeyCount,
+            BadKey,
+        }
+
+        // TODO: maybe also move this back to hyper-rustls?
+        pub fn load_certs(filename: &str) -> ::std::result::Result<Vec<rustls::Certificate>, Error> {
+            let certfile = fs::File::open(filename).map_err(|e| Error::Io(e))?;
+            let mut reader = BufReader::new(certfile);
+            pemfile::certs(&mut reader).map_err(|_| Error::BadCerts)
+        }
+
+        // TODO: maybe also move this back to hyper-rustls?
+        pub fn load_private_key(filename: &str) -> ::std::result::Result<rustls::PrivateKey, Error> {
+            use std::io::Seek;
+            use std::io::BufRead;
+
+            let keyfile = fs::File::open(filename).map_err(Error::Io)?;
+            let mut reader = BufReader::new(keyfile);
+
+            // "rsa" (PKCS1) PEM files have a different first-line header
+            // than PKCS8 PEM files, use that to determine parse function.
+            let mut first_line = String::new();
+            reader.read_line(&mut first_line).map_err(Error::Io)?;
+            reader.seek(io::SeekFrom::Start(0)).map_err(Error::Io)?;
+
+            let private_keys_fn = match first_line.trim_right() {
+                "-----BEGIN RSA PRIVATE KEY-----" => pemfile::rsa_private_keys,
+                "-----BEGIN PRIVATE KEY-----" => pemfile::pkcs8_private_keys,
+                _ => return Err(Error::BadKey)
+            };
+
+            let key = private_keys_fn(&mut reader)
+                .map_err(|_| Error::BadKey)
+                .and_then(|mut keys| match keys.len() {
+                    0 => Err(Error::BadKey),
+                    1 => Ok(keys.remove(0)),
+                    _ => Err(Error::BadKeyCount),
+                })?;
+
+            // Ensure we can use the key.
+            if RSASigner::new(&key).is_err() {
+                Err(Error::BadKey)
+            } else {
+                Ok(key)
+            }
+        }
+
         let pem_err = "malformed PEM file";
 
         // Load the certificates.
-        let certs = tls::load_certs(certs_path)
+        let certs = load_certs(certs_path)
             .map_err(|e| match e {
-                Io(e) => ConfigError::Io(e, "tls"),
+                Error::Io(e) => ConfigError::Io(e, "tls"),
                 _ => self.bad_type("tls", pem_err, "a valid certificates file")
             })?;
 
         // And now the private key.
-        let key = tls::load_private_key(key_path)
+        let key = load_private_key(key_path)
             .map_err(|e| match e {
-                Io(e) => ConfigError::Io(e, "tls"),
+                Error::Io(e) => ConfigError::Io(e, "tls"),
                 _ => self.bad_type("tls", pem_err, "a valid private key file")
             })?;
 

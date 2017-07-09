@@ -7,8 +7,8 @@ use http::Status;
 #[derive(Debug)]
 pub struct Failure(pub Status);
 
-impl Responder<'static> for Failure {
-    fn respond_to(self, _: &Request) -> Result<Response<'static>, Status> {
+impl Responder for Failure {
+    fn respond_to(self, _: &Request) -> Result<Response, Status> {
         Err(self.0)
     }
 }

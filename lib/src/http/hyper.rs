@@ -4,24 +4,25 @@
 //! These types will, with certainty, be removed with time, but they reside here
 //! while necessary.
 
-pub(crate) use hyper::server::Request as Request;
-pub(crate) use hyper::server::Response as Response;
-pub(crate) use hyper::server::Server as Server;
-pub(crate) use hyper::server::Handler as Handler;
+use futures::stream::BoxStream;
+use hyper;
 
-pub(crate) use hyper::net;
+pub(crate) type Body = hyper::Body;
+pub(crate) type Request = hyper::server::Request;
+pub(crate) type Response = hyper::server::Response<BoxStream<hyper::Chunk, hyper::Error>>;
 
-pub(crate) use hyper::method::Method;
-pub(crate) use hyper::status::StatusCode;
+pub(crate) use hyper::server::Http;
+pub(crate) use hyper::server::Service;
+pub(crate) use hyper::server::NewService;
+
+pub(crate) use hyper::Chunk;
+pub(crate) use hyper::Method;
+pub(crate) use hyper::StatusCode;
 pub(crate) use hyper::error::Error;
-pub(crate) use hyper::uri::RequestUri;
-pub(crate) use hyper::http::h1;
-pub(crate) use hyper::buffer;
+pub(crate) use hyper::Result;
+pub(crate) use hyper::Uri;
 
 pub use hyper::mime;
-
-/// Type alias to `hyper::Response<'a, hyper::net::Fresh>`.
-pub(crate) type FreshResponse<'a> = self::Response<'a, self::net::Fresh>;
 
 /// Reexported Hyper header types.
 pub mod header {

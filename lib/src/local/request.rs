@@ -340,21 +340,21 @@ impl<'c> fmt::Debug for LocalRequest<'c> {
 /// [`Response`]: /rocket/struct.Response.html
 pub struct LocalResponse<'c> {
     _request: Rc<Request<'c>>,
-    response: Response<'c>,
+    response: Response,
 }
 
 impl<'c> Deref for LocalResponse<'c> {
-    type Target = Response<'c>;
+    type Target = Response;
 
     #[inline(always)]
-    fn deref(&self) -> &Response<'c> {
+    fn deref(&self) -> &Response {
         &self.response
     }
 }
 
 impl<'c> DerefMut for LocalResponse<'c> {
     #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Response<'c> {
+    fn deref_mut(&mut self) -> &mut Response {
         &mut self.response
     }
 }

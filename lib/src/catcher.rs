@@ -100,7 +100,7 @@ impl Catcher {
 
     #[inline(always)]
     pub(crate) fn handle<'r>(&self, err: Error, req: &'r Request)
-            -> response::Result<'r> {
+            -> response::Result {
         (self.handler)(err, req)
     }
 
@@ -156,7 +156,7 @@ macro_rules! default_errors {
         let mut map = HashMap::new();
 
         $(
-            fn $fn_name<'r>(_: Error, req: &'r Request) -> response::Result<'r> {
+            fn $fn_name<'r>(_: Error, req: &'r Request) -> response::Result {
                 status::Custom(Status::from_code($code).unwrap(),
                     content::HTML(error_page_template!($code, $name, $description))
                 ).respond_to(req)

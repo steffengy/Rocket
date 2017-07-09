@@ -158,11 +158,11 @@ impl<T> fmt::Debug for Body<T> {
 ///     .sized_body(Cursor::new("Brewing the best coffee!"))
 ///     .finalize();
 /// ```
-pub struct ResponseBuilder<'r> {
-    response: Response<'r>
+pub struct ResponseBuilder {
+    response: Response
 }
 
-impl<'r> ResponseBuilder<'r> {
+impl ResponseBuilder {
     /// Creates a new `ResponseBuilder` that will build on top of the `base`
     /// `Response`.
     ///
@@ -175,7 +175,7 @@ impl<'r> ResponseBuilder<'r> {
     /// let builder = ResponseBuilder::new(Response::new());
     /// ```
     #[inline(always)]
-    pub fn new(base: Response<'r>) -> ResponseBuilder<'r> {
+    pub fn new(base: Response) -> ResponseBuilder {
         ResponseBuilder {
             response: base
         }
@@ -195,7 +195,7 @@ impl<'r> ResponseBuilder<'r> {
     ///     .finalize();
     /// ```
     #[inline(always)]
-    pub fn status(&mut self, status: Status) -> &mut ResponseBuilder<'r> {
+    pub fn status(&mut self, status: Status) -> &mut ResponseBuilder {
         self.response.set_status(status);
         self
     }
@@ -215,7 +215,7 @@ impl<'r> ResponseBuilder<'r> {
     /// ```
     #[inline(always)]
     pub fn raw_status(&mut self, code: u16, reason: &'static str)
-            -> &mut ResponseBuilder<'r> {
+            -> &mut ResponseBuilder {
         self.response.set_raw_status(code, reason);
         self
     }
@@ -244,8 +244,8 @@ impl<'r> ResponseBuilder<'r> {
     /// assert_eq!(response.headers().get("Content-Type").count(), 1);
     /// ```
     #[inline(always)]
-    pub fn header<'h: 'r, H>(&mut self, header: H) -> &mut ResponseBuilder<'r>
-        where H: Into<Header<'h>>
+    pub fn header<H>(&mut self, header: H) -> &mut ResponseBuilder
+        where H: Into<Header<'static>>
     {
         self.response.set_header(header);
         self
@@ -275,8 +275,8 @@ impl<'r> ResponseBuilder<'r> {
     /// assert_eq!(response.headers().get("Accept").count(), 2);
     /// ```
     #[inline(always)]
-    pub fn header_adjoin<'h: 'r, H>(&mut self, header: H) -> &mut ResponseBuilder<'r>
-        where H: Into<Header<'h>>
+    pub fn header_adjoin<H>(&mut self, header: H) -> &mut ResponseBuilder
+        where H: Into<Header<'static>>
     {
         self.response.adjoin_header(header);
         self
@@ -300,9 +300,9 @@ impl<'r> ResponseBuilder<'r> {
     /// assert_eq!(response.headers().get("X-Custom").count(), 1);
     /// ```
     #[inline(always)]
-    pub fn raw_header<'a: 'r, 'b: 'r, N, V>(&mut self, name: N, value: V)
-            -> &mut ResponseBuilder<'r>
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>
+    pub fn raw_header<N, V>(&mut self, name: N, value: V)
+            -> &mut ResponseBuilder
+        where N: Into<Cow<'static, str>>, V: Into<Cow<'static, str>>
     {
         self.response.set_raw_header(name, value);
         self
@@ -327,9 +327,9 @@ impl<'r> ResponseBuilder<'r> {
     /// assert_eq!(response.headers().get("X-Custom").count(), 2);
     /// ```
     #[inline(always)]
-    pub fn raw_header_adjoin<'a: 'r, 'b: 'r, N, V>(&mut self, name: N, value: V)
-            -> &mut ResponseBuilder<'r>
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>
+    pub fn raw_header_adjoin<N, V>(&mut self, name: N, value: V)
+            -> &mut ResponseBuilder
+        where N: Into<Cow<'static, str>>, V: Into<Cow<'static, str>>
     {
         self.response.adjoin_raw_header(name, value);
         self
@@ -354,8 +354,8 @@ impl<'r> ResponseBuilder<'r> {
     /// # }
     /// ```
     #[inline(always)]
-    pub fn sized_body<B>(&mut self, body: B) -> &mut ResponseBuilder<'r>
-        where B: io::Read + io::Seek + 'r
+    pub fn sized_body<B>(&mut self, body: B) -> &mut ResponseBuilder
+        where B: io::Read + io::Seek + Send + 'static
     {
         self.response.set_sized_body(body);
         self
@@ -380,8 +380,8 @@ impl<'r> ResponseBuilder<'r> {
     /// # }
     /// ```
     #[inline(always)]
-    pub fn streamed_body<B>(&mut self, body: B) -> &mut ResponseBuilder<'r>
-        where B: io::Read + 'r
+    pub fn streamed_body<B>(&mut self, body: B) -> &mut ResponseBuilder
+        where B: io::Read + Send + 'static
     {
         self.response.set_streamed_body(body);
         self
@@ -407,8 +407,8 @@ impl<'r> ResponseBuilder<'r> {
     /// # }
     /// ```
     #[inline(always)]
-    pub fn chunked_body<B: io::Read + 'r>(&mut self, body: B, chunk_size: u64)
-            -> &mut ResponseBuilder<'r>
+    pub fn chunked_body<B: io::Read + Send + 'static>(&mut self, body: B, chunk_size: u64)
+        -> &mut ResponseBuilder
     {
         self.response.set_chunked_body(body, chunk_size);
         self
@@ -430,8 +430,8 @@ impl<'r> ResponseBuilder<'r> {
     ///     .finalize();
     /// ```
     #[inline(always)]
-    pub fn raw_body<T: io::Read + 'r>(&mut self, body: Body<T>)
-            -> &mut ResponseBuilder<'r>
+    pub fn raw_body<T: io::Read + Send + 'static>(&mut self, body: Body<T>)
+            -> &mut ResponseBuilder
     {
         self.response.set_raw_body(body);
         self
@@ -475,7 +475,7 @@ impl<'r> ResponseBuilder<'r> {
     /// # }
     /// ```
     #[inline(always)]
-    pub fn merge(&mut self, other: Response<'r>) -> &mut ResponseBuilder<'r> {
+    pub fn merge(&mut self, other: Response) -> &mut ResponseBuilder {
         self.response.merge(other);
         self
     }
@@ -519,7 +519,7 @@ impl<'r> ResponseBuilder<'r> {
     /// # }
     /// ```
     #[inline(always)]
-    pub fn join(&mut self, other: Response<'r>) -> &mut ResponseBuilder<'r> {
+    pub fn join(&mut self, other: Response) -> &mut ResponseBuilder {
         self.response.join(other);
         self
     }
@@ -537,7 +537,7 @@ impl<'r> ResponseBuilder<'r> {
     ///     .finalize();
     /// ```
     #[inline(always)]
-    pub fn finalize(&mut self) -> Response<'r> {
+    pub fn finalize(&mut self) -> Response {
         ::std::mem::replace(&mut self.response, Response::new())
     }
 
@@ -555,20 +555,20 @@ impl<'r> ResponseBuilder<'r> {
     /// assert!(response.is_ok());
     /// ```
     #[inline(always)]
-    pub fn ok<T>(&mut self) -> Result<Response<'r>, T> {
+    pub fn ok<T>(&mut self) -> Result<Response, T> {
         Ok(self.finalize())
     }
 }
 
 /// A response, as returned by `Responder`s.
 #[derive(Default)]
-pub struct Response<'r> {
+pub struct Response {
     status: Option<Status>,
-    headers: HeaderMap<'r>,
-    body: Option<Body<Box<io::Read + 'r>>>,
+    headers: HeaderMap,
+    body: Option<Body<Box<io::Read + Send + 'static>>>,
 }
 
-impl<'r> Response<'r> {
+impl Response {
     /// Creates a new, empty `Response` without a status, body, or headers.
     /// Because all HTTP responses must have a status, if a default `Response`
     /// is written to the client without a status, the status defaults to `200
@@ -587,7 +587,7 @@ impl<'r> Response<'r> {
     /// assert!(response.body().is_none());
     /// ```
     #[inline(always)]
-    pub fn new() -> Response<'r> {
+    pub fn new() -> Response {
         Response {
             status: None,
             headers: HeaderMap::new(),
@@ -606,7 +606,7 @@ impl<'r> Response<'r> {
     /// let builder = Response::build();
     /// ```
     #[inline(always)]
-    pub fn build() -> ResponseBuilder<'r> {
+    pub fn build() -> ResponseBuilder {
         Response::build_from(Response::new())
     }
 
@@ -622,7 +622,7 @@ impl<'r> Response<'r> {
     /// let builder = Response::build_from(other);
     /// ```
     #[inline(always)]
-    pub fn build_from(other: Response<'r>) -> ResponseBuilder<'r> {
+    pub fn build_from(other: Response) -> ResponseBuilder {
         ResponseBuilder::new(other)
     }
 
@@ -718,7 +718,7 @@ impl<'r> Response<'r> {
     /// assert_eq!(custom_headers.next(), None);
     /// ```
     #[inline(always)]
-    pub fn headers(&self) -> &HeaderMap<'r> {
+    pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
@@ -745,7 +745,7 @@ impl<'r> Response<'r> {
     /// assert_eq!(response.headers().len(), 1);
     /// ```
     #[inline(always)]
-    pub fn set_header<'h: 'r, H: Into<Header<'h>>>(&mut self, header: H) -> bool {
+    pub fn set_header<H: Into<Header<'static>>>(&mut self, header: H) -> bool {
         self.headers.replace(header)
     }
 
@@ -771,8 +771,8 @@ impl<'r> Response<'r> {
     /// assert_eq!(response.headers().len(), 1);
     /// ```
     #[inline(always)]
-    pub fn set_raw_header<'a: 'r, 'b: 'r, N, V>(&mut self, name: N, value: V) -> bool
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>
+    pub fn set_raw_header<N, V>(&mut self, name: N, value: V) -> bool
+        where N: Into<Cow<'static, str>>, V: Into<Cow<'static, str>>
     {
         self.set_header(Header::new(name, value))
     }
@@ -800,7 +800,7 @@ impl<'r> Response<'r> {
     /// assert_eq!(accept_headers.next(), None);
     /// ```
     #[inline(always)]
-    pub fn adjoin_header<'h: 'r, H: Into<Header<'h>>>(&mut self, header: H) {
+    pub fn adjoin_header<H: Into<Header<'static>>>(&mut self, header: H) {
         self.headers.add(header)
     }
 
@@ -827,8 +827,8 @@ impl<'r> Response<'r> {
     /// assert_eq!(custom_headers.next(), None);
     /// ```
     #[inline(always)]
-    pub fn adjoin_raw_header<'a: 'r, 'b: 'r, N, V>(&mut self, name: N, value: V)
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>
+    pub fn adjoin_raw_header<N, V>(&mut self, name: N, value: V)
+        where N: Into<Cow<'static, str>>, V: Into<Cow<'static, str>>
     {
         self.adjoin_header(Header::new(name, value));
     }
@@ -948,7 +948,7 @@ impl<'r> Response<'r> {
     /// assert!(response.body().is_none());
     /// ```
     #[inline(always)]
-    pub fn take_body(&mut self) -> Option<Body<Box<io::Read + 'r>>> {
+    pub fn take_body(&mut self) -> Option<Body<Box<io::Read + Send + 'static>>> {
         self.body.take()
     }
 
@@ -986,7 +986,7 @@ impl<'r> Response<'r> {
     /// ```
     #[inline]
     pub fn set_sized_body<B>(&mut self, mut body: B)
-        where B: io::Read + io::Seek + 'r
+        where B: io::Read + io::Seek + Send + 'static
     {
         let size = body.seek(io::SeekFrom::End(0))
             .expect("Attempted to retrieve size by seeking, but failed.");
@@ -1011,7 +1011,7 @@ impl<'r> Response<'r> {
     /// assert_eq!(response.body_string(), Some("aaaaa".to_string()));
     /// ```
     #[inline(always)]
-    pub fn set_streamed_body<B>(&mut self, body: B) where B: io::Read + 'r {
+    pub fn set_streamed_body<B>(&mut self, body: B) where B: io::Read + Send + 'static {
         self.set_chunked_body(body, DEFAULT_CHUNK_SIZE);
     }
 
@@ -1030,7 +1030,7 @@ impl<'r> Response<'r> {
     /// ```
     #[inline(always)]
     pub fn set_chunked_body<B>(&mut self, body: B, chunk_size: u64)
-            where B: io::Read + 'r {
+            where B: io::Read + Send + 'static {
         self.body = Some(Body::Chunked(Box::new(body), chunk_size));
     }
 
@@ -1052,7 +1052,7 @@ impl<'r> Response<'r> {
     /// assert_eq!(response.body_string(), Some("Hello!".to_string()));
     /// ```
     #[inline(always)]
-    pub fn set_raw_body<T: io::Read + 'r>(&mut self, body: Body<T>) {
+    pub fn set_raw_body<T: io::Read + Send + 'static>(&mut self, body: Body<T>) {
         self.body = Some(match body {
             Body::Sized(b, n) => Body::Sized(Box::new(b.take(n)), n),
             Body::Chunked(b, n) => Body::Chunked(Box::new(b), n),
@@ -1094,7 +1094,7 @@ impl<'r> Response<'r> {
     /// assert_eq!(custom_values, vec!["value 1"]);
     /// # }
     /// ```
-    pub fn merge(&mut self, other: Response<'r>) {
+    pub fn merge(&mut self, other: Response) {
         if let Some(status) = other.status {
             self.status = Some(status);
         }
@@ -1143,7 +1143,7 @@ impl<'r> Response<'r> {
     /// assert_eq!(custom_values, vec!["value 2", "value 3", "value 1"]);
     /// # }
     /// ```
-    pub fn join(&mut self, other: Response<'r>) {
+    pub fn join(&mut self, other: Response) {
         if self.status.is_none() {
             self.status = other.status;
         }
@@ -1158,7 +1158,7 @@ impl<'r> Response<'r> {
     }
 }
 
-impl<'r> fmt::Debug for Response<'r> {
+impl fmt::Debug for Response {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "{}", self.status())?;
 
@@ -1175,9 +1175,9 @@ impl<'r> fmt::Debug for Response<'r> {
 
 use request::Request;
 
-impl<'r> Responder<'r> for Response<'r> {
+impl Responder for Response {
     /// This is the identity implementation. It simply returns `Ok(self)`.
-    fn respond_to(self, _: &Request) -> Result<Response<'r>, Status> {
+    fn respond_to(self, _: &Request) -> Result<Response, Status> {
         Ok(self)
     }
 }

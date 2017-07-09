@@ -2,15 +2,22 @@ use std::collections::HashMap;
 use std::str::from_utf8_unchecked;
 use std::cmp::min;
 use std::net::SocketAddr;
-use std::io::{self, Write};
+use std::net::ToSocketAddrs;
+use std::io;
 use std::mem;
-
+use std::sync::Arc;
+use futures::{self, Async, Future, Stream, Poll};
+use futures::future::{IntoFuture, FutureResult};
+use futures_cpupool::{CpuFuture, CpuPool};
+use hyper::server::NewService;
+use tokio_core::reactor::Core;
+use tokio_core::net::TcpListener;
 use yansi::Paint;
 use state::Container;
 
-#[cfg(feature = "tls")] use hyper_rustls::TlsServer;
+#[cfg(feature = "tls")] use rustls;
+#[cfg(feature = "tls")] use tokio_rustls::{self, ServerConfigExt};
 use {logger, handler};
-use ext::ReadExt;
 use config::{self, Config, LoggedValue};
 use request::{Request, FormItems};
 use data::Data;
@@ -36,91 +43,87 @@ pub struct Rocket {
     fairings: Fairings,
 }
 
+#[derive(Clone)]
+struct RocketService(Arc<(Rocket, CpuPool)>);
+
 #[doc(hidden)]
-impl hyper::Handler for Rocket {
+impl hyper::NewService for RocketService {
+    type Request = hyper::Request;
+    type Response = hyper::Response;
+    type Error = hyper::Error;
+    type Instance = Self;
+
+    fn new_service(&self) -> Result<Self::Instance, io::Error> {
+        Ok(self.clone())
+    }
+}
+
+#[doc(hidden)]
+impl hyper::Service for RocketService {
+    type Request = hyper::Request;
+    type Response = hyper::Response;
+    type Error = hyper::Error;
+    type Future = CpuFuture<hyper::Response, hyper::Error>;
+
     // This function tries to hide all of the Hyper-ness from Rocket. It
     // essentially converts Hyper types into Rocket types, then calls the
     // `dispatch` function, which knows nothing about Hyper. Because responding
     // depends on the `HyperResponse` type, this function does the actual
     // response processing.
-    fn handle<'h, 'k>(&self,
-                      hyp_req: hyper::Request<'h, 'k>,
-                      res: hyper::FreshResponse<'h>) {
-        // Get all of the information from Hyper.
-        let (h_addr, h_method, h_headers, h_uri, _, h_body) = hyp_req.deconstruct();
+    fn call(&self, hyp_req: hyper::Request) -> Self::Future {
+        let inner = self.0.clone();
+        (self.0).1.spawn_fn(move || {
+            let rocket = &inner.0;
 
-        // Convert the Hyper request into a Rocket request.
-        let req_res = Request::from_hyp(self, h_method, h_headers, h_uri, h_addr);
-        let mut req = match req_res {
-            Ok(req) => req,
-            Err(e) => {
-                error!("Bad incoming request: {}", e);
-                let dummy = Request::new(self, Method::Get, URI::new("<unknown>"));
-                let r = self.handle_error(Status::InternalServerError, &dummy);
-                return self.issue_response(r, res);
-            }
-        };
+            // Get all of the information from Hyper.
+            let h_addr = hyp_req.remote_addr().unwrap();
+            let (h_method, h_uri, _, h_headers, h_body) = hyp_req.deconstruct();
 
-        // Retrieve the data from the hyper body.
-        let data = match Data::from_hyp(h_body) {
-            Ok(data) => data,
-            Err(reason) => {
-                error_!("Bad data in request: {}", reason);
-                let r = self.handle_error(Status::InternalServerError, &req);
-                return self.issue_response(r, res);
-            }
-        };
+            // Convert the Hyper request into a Rocket request.
+            let req_res = Request::from_hyp(rocket, h_method, h_headers, h_uri, h_addr);
+            let mut req = match req_res {
+                Ok(req) => req,
+                Err(e) => {
+                    error!("Bad incoming request: {}", e);
+                    let dummy = Request::new(rocket, Method::Get, URI::new("<unknown>"));
+                    let r = rocket.handle_error(Status::InternalServerError, &dummy);
+                    return rocket.issue_response(r);
+                }
+            };
 
-        // Dispatch the request to get a response, then write that response out.
-        // let req = UnsafeCell::new(req);
-        let response = self.dispatch(&mut req, data);
-        self.issue_response(response, res)
+            // Retrieve the data from the hyper body.
+            let data = Data::from_hyp(h_body);
+
+            // Dispatch the request to get a response, then write that response out.
+            // let req = UnsafeCell::new(req);
+            let response = rocket.dispatch(&mut req, data);
+            rocket.issue_response(response)
+        })
     }
-}
-
-// This macro is a terrible hack to get around Hyper's Server<L> type. What we
-// want is to use almost exactly the same launch code when we're serving over
-// HTTPS as over HTTP. But Hyper forces two different types, so we can't use the
-// same code, at least not trivially. These macros get around that by passing in
-// the same code as a continuation in `$continue`. This wouldn't work as a
-// regular function taking in a closure because the types of the inputs to the
-// closure would be different depending on whether TLS was enabled or not.
-#[cfg(not(feature = "tls"))]
-macro_rules! serve {
-    ($rocket:expr, $addr:expr, |$server:ident, $proto:ident| $continue:expr) => ({
-        let ($proto, $server) = ("http://", hyper::Server::http($addr));
-        $continue
-    })
-}
-
-#[cfg(feature = "tls")]
-macro_rules! serve {
-    ($rocket:expr, $addr:expr, |$server:ident, $proto:ident| $continue:expr) => ({
-        if let Some(tls) = $rocket.config.tls.clone() {
-            let tls = TlsServer::new(tls.certs, tls.key);
-            let ($proto, $server) = ("https://", hyper::Server::https($addr, tls));
-            $continue
-        } else {
-            let ($proto, $server) = ("http://", hyper::Server::http($addr));
-            $continue
-        }
-    })
 }
 
 impl Rocket {
     #[inline]
-    fn issue_response(&self, response: Response, hyp_res: hyper::FreshResponse) {
-        match self.write_response(response, hyp_res) {
-            Ok(_) => info_!("{}", Paint::green("Response succeeded.")),
-            Err(e) => error_!("Failed to write response: {:?}.", e)
+    fn issue_response(&self, response: Response) -> FutureResult<hyper::Response, hyper::Error> {
+        // TODO: move info_ and error_?
+        match self.write_response(response) {
+            Ok(ret) => {
+                info_!("{}", Paint::green("Response succeeded."));
+                futures::future::ok(ret)
+            }
+            Err(e) => {
+                error_!("Failed to write response: {:?}.", e);
+                futures::future::err(e.into())
+            }
         }
     }
 
     #[inline]
-    fn write_response(&self, mut response: Response,
-                      mut hyp_res: hyper::FreshResponse) -> io::Result<()>
+    fn write_response(&self, mut response: Response) -> hyper::Result<hyper::Response>
     {
-        *hyp_res.status_mut() = hyper::StatusCode::from_u16(response.status().code);
+        let mut hyp_res = hyper::Response::new();
+        hyp_res.set_status(hyper::StatusCode::try_from(
+            response.status().code).map_err(|_| hyper::Error::Status)?);
 
         for header in response.headers().iter() {
             // FIXME: Using hyper here requires two allocations.
@@ -129,42 +132,58 @@ impl Rocket {
             hyp_res.headers_mut().append_raw(name, value);
         }
 
-        if response.body().is_none() {
-            hyp_res.headers_mut().set(header::ContentLength(0));
-            return hyp_res.start()?.end();
-        }
-
-        match response.body() {
+        match response.take_body() {
             None => {
                 hyp_res.headers_mut().set(header::ContentLength(0));
-                hyp_res.start()?.end()
             }
             Some(Body::Sized(mut body, size)) => {
+                // TODO: Figure out how to get rid of the extra copy (own Body/wrapping?)
                 hyp_res.headers_mut().set(header::ContentLength(size));
-                let mut stream = hyp_res.start()?;
-                io::copy(body, &mut stream)?;
-                stream.end()
+                let mut buf = Vec::with_capacity(size as usize);
+                body.read_to_end(&mut buf)?;
+                hyp_res.set_body(hyper::Body::from(buf).boxed());
             }
-            Some(Body::Chunked(mut body, chunk_size)) => {
+            Some(Body::Chunked(body, chunk_size)) => {
                 // This _might_ happen on a 32-bit machine!
                 if chunk_size > (usize::max_value() as u64) {
                     let msg = "chunk size exceeds limits of usize type";
-                    return Err(io::Error::new(io::ErrorKind::Other, msg));
+                    return Err(io::Error::new(io::ErrorKind::Other, msg).into());
+                }
+                let chunk_size = chunk_size as usize;
+                // sync-async hybrid for now that will block for each chunk (but not the entire data)
+                struct Chunked<R: io::Read + Send> {
+                    pos: usize,
+                    buf: Vec<u8>,
+                    reader: R,
+                    chunk_size: usize,
                 }
 
-                // The buffer stores the current chunk being written out.
-                let mut buffer = vec![0; chunk_size as usize];
-                let mut stream = hyp_res.start()?;
-                loop {
-                    match body.read_max(&mut buffer)? {
-                        0 => break,
-                        n => stream.write_all(&buffer[..n])?,
+                impl<R: io::Read + Send> Stream for Chunked<R> {
+                    type Item = hyper::Chunk;
+                    type Error = hyper::Error;
+
+                    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+                        // we only do synchronous reads here, until Rockets body is rewritten to async
+                        loop {
+                            let amount = self.reader.read(&mut self.buf[self.pos..])?;
+                            if amount == 0 {
+                                return Ok(Async::Ready(None));
+                            }
+                            self.pos += amount;
+                            if self.pos == self.chunk_size {
+                                self.pos = 0;
+                                let chunk = mem::replace(&mut self.buf, vec![0u8; self.chunk_size]).into();
+                                return Ok(Async::Ready(Some(chunk)));
+                            }
+                        }
                     }
                 }
-
-                stream.end()
+                let body = Chunked { pos: 0, buf: vec![0u8; chunk_size], reader: body, chunk_size };
+                hyp_res.set_body(body.boxed());
             }
         }
+
+        Ok(hyp_res)
     }
 
     /// Preprocess the request for Rocket things. Currently, this means:
@@ -213,7 +232,7 @@ impl Rocket {
     #[inline]
     pub(crate) fn dispatch<'s, 'r>(&'s self,
                                    request: &'r mut Request<'s>,
-                                   data: Data) -> Response<'r> {
+                                   data: Data) -> Response {
         info!("{}:", request);
 
         // Do a bit of preprocessing before routing; run the attached fairings.
@@ -276,7 +295,7 @@ impl Rocket {
     #[inline]
     pub(crate) fn route<'s, 'r>(&'s self,
                                 request: &'r Request<'s>,
-                                mut data: Data) -> handler::Outcome<'r> {
+                                mut data: Data) -> handler::Outcome {
         // Go through the list of matching routes until we fail or succeed.
         let matches = self.router.route(request);
         for route in matches {
@@ -305,7 +324,7 @@ impl Rocket {
     // catcher is called. If the catcher fails to return a good response, the
     // 500 catcher is executed. if there is no registered catcher for `status`,
     // the default catcher is used.
-    fn handle_error<'r>(&self, status: Status, req: &'r Request) -> Response<'r> {
+    fn handle_error<'r>(&self, status: Status, req: &'r Request) -> Response {
         warn_!("Responding with {} catcher.", Paint::red(&status));
 
         // Try to get the active catcher but fallback to user's 500 catcher.
@@ -660,34 +679,91 @@ impl Rocket {
         self.fairings.pretty_print_counts();
 
         let full_addr = format!("{}:{}", self.config.address, self.config.port);
-        serve!(self, &full_addr, |server, proto| {
-            let mut server = match server {
-                Ok(server) => server,
-                Err(e) => return LaunchError::from(e)
+
+        let pool = CpuPool::new(self.config.workers as usize);
+        let rocket = Arc::new((self, pool));
+        let srv = RocketService(rocket.clone());
+
+        let bind_addrs = match full_addr.to_socket_addrs() {
+            Ok(x) => x,
+            Err(e) => return LaunchError::from(e),
+        };
+
+        for bind_addr in bind_addrs {
+            let mut reactor = match Core::new() {
+                Ok(x) => x,
+                Err(err) => return LaunchError::from(err),
+            };
+            let handle = reactor.handle();
+            let listener = match TcpListener::bind(&bind_addr, &handle) {
+                Ok(x) => x,
+                Err(e) => return LaunchError::from(e),
+            };
+            
+            // Determine the address and port we actually binded to.
+            self.config.port = match listener.local_addr() {
+                Ok(server_addr) => server_addr.port(),
+                Err(e) => return LaunchError::from(e),
             };
 
-            // Determine the address and port we actually binded to.
-            match server.local_addr() {
-                Ok(server_addr) => self.config.port = server_addr.port(),
-                Err(e) => return LaunchError::from(e)
+            // Run the launch fairings. (TODO: do we really need the ARC-rocket here?)
+            rocket.0.fairings.handle_launch(&rocket.0);
+
+            let tls_config = match rocket.0.config.tls.clone() {
+                #[cfg(feature = "tls")]
+                Some(tls) => {
+                    let mut cfg = rustls::ServerConfig::new();
+                    let cache = rustls::ServerSessionMemoryCache::new(1024);
+                    cfg.set_persistence(cache);
+                    cfg.ticketer = rustls::Ticketer::new();
+                    cfg.set_single_cert(tls.certs, tls.key);
+                    Some(Arc::new(cfg))
+                },
+                _ => None
+            };
+            // a little hack to infer the type when tls is disabled
+            #[cfg(not(feature = "tls"))] {tls_config as Option<bool>};
+            let proto = tls_config.as_ref().map(|_| "https").unwrap_or("http");
+
+            launch_info!("🚀  {} {}{}",
+                Paint::white("Rocket has launched from"),
+                Paint::white(proto).bold(),
+                Paint::white(&full_addr).bold());
+
+            macro_rules! serve {
+                (inner, $listener:ident, $continue:expr) => ({
+                    let fut = listener.incoming().for_each($continue);
+                    reactor.run(fut)
+                });
+                ($tls_config:expr, $listener:ident, $continue:expr) => ({
+                    match $tls_config.clone() {
+                        #[cfg(feature = "tls")]
+                        Some(cfg) => serve!(inner, $listener, |(socket, addr)| {
+                            cfg.accept_async(socket).map(move |x| (x, addr)).and_then($continue)
+                        }),
+                        _ => serve!(inner, $listener, |(socket, addr)| {
+                            futures::future::ok((socket, addr)).and_then($continue)
+                        }),
+                    }
+                });
             }
 
-            // Run the launch fairings.
-            self.fairings.handle_launch(&self);
-
-            let full_addr = format!("{}:{}", self.config.address, self.config.port);
-            launch_info!("🚀  {} {}{}",
-                  Paint::white("Rocket has launched from"),
-                  Paint::white(proto).bold(),
-                  Paint::white(&full_addr).bold());
-
-            let threads = self.config.workers as usize;
-            if let Err(e) = server.handle_threads(self, threads) {
+            let ret = serve!(tls_config, listener, |(stream, addr)| {
+                srv.new_service().into_future().map(move |x| (x, addr)).and_then(|(service, addr)| {
+                    hyper::Http::new().bind_connection(&handle, stream, addr, service);
+                    Ok(())
+                })
+            });
+            if let Err(e) = ret {
                 return LaunchError::from(e);
             }
+            
+            // we could support binding to multiple IPs (e.g. localhost:8080)
+            // but we do not support that (yet? TODO?)
+            break;
+        }
 
-            unreachable!("the call to `handle_threads` should block on success")
-        })
+        unreachable!("the event loop should block")
     }
 
     /// Returns an iterator over all of the routes mounted on this instance of

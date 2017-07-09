@@ -104,11 +104,11 @@ impl Redirect {
 /// Constructs a response with the appropriate status code and the given URL in
 /// the `Location` header field. The body of the response is empty. This
 /// responder does not fail.
-impl Responder<'static> for Redirect {
-    fn respond_to(self, _: &Request) -> Result<Response<'static>, Status> {
+impl Responder for Redirect {
+    fn respond_to(self, _: &Request) -> Result<Response, Status> {
         Response::build()
             .status(self.0)
-            .header(header::Location(self.1))
+            .header(header::Location::new(self.1))
             .ok()
     }
 }

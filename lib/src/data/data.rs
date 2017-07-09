@@ -1,24 +1,11 @@
-use std::io::{self, Read, Write, Cursor, Chain};
+use std::cmp;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::fs::File;
-use std::time::Duration;
 
-#[cfg(feature = "tls")] use super::net_stream::HttpsStream;
-
-use super::data_stream::{DataStream, kill_stream};
-use super::net_stream::NetStream;
-use ext::ReadExt;
+use futures::{Future, Stream};
 
 use http::hyper;
-use http::hyper::h1::HttpReader;
-use http::hyper::h1::HttpReader::*;
-use http::hyper::net::{HttpStream, NetworkStream};
-
-pub type HyperBodyReader<'a, 'b> =
-    self::HttpReader<&'a mut hyper::buffer::BufReader<&'b mut NetworkStream>>;
-
-//                              |---- from hyper ----|
-pub type BodyReader = HttpReader<Chain<Cursor<Vec<u8>>, NetStream>>;
 
 /// The number of bytes to read into the "peek" buffer.
 const PEEK_BYTES: usize = 512;
@@ -53,8 +40,50 @@ const PEEK_BYTES: usize = 512;
 /// without consuming the `Data` object.
 pub struct Data {
     buffer: Vec<u8>,
-    is_complete: bool,
-    stream: BodyReader,
+    stream: Option<hyper::Body>,
+}
+
+/// Raw data stream of a request body.
+///
+/// This stream can only be obtained by calling
+/// [Data::open](/rocket/data/struct.Data.html#method.open). The stream contains
+/// all of the data in the body of the request. It exposes no methods directly.
+/// Instead, it must be used as an opaque `Read` structure.
+// TODO: In the long term (full async) we want to get rid of this entirely!
+pub struct DataStream(usize, Data);
+
+// TODO: Have a `BufRead` impl for `DataStream`. At the moment, this isn't
+// possible since Hyper's `HttpReader` doesn't implement `BufRead`.
+impl Read for DataStream {
+    #[inline(always)]
+    fn read(&mut self, target: &mut [u8]) -> io::Result<usize> {
+        trace_!("DataStream::read()");
+        let buf = &mut self.1.buffer;
+
+        if buf.len() <= self.0 {
+            if let Some(stream) = self.1.stream.take() {
+                buf.truncate(0);
+                self.0 = 0;
+                match stream.into_future().wait() {
+                    Ok((chunk, stream)) => {
+                        if let Some(chunk) = chunk {
+                            buf.extend_from_slice(&chunk);
+                        }
+                        self.1.stream = Some(stream);
+                    }
+                    Err(_) => return Err(io::Error::new(io::ErrorKind::Other, "")),
+                }
+            }
+        }
+        let buf = &mut buf[self.0..];
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let amount = cmp::min(buf.len(), target.len());
+        target[..amount].copy_from_slice(&buf[..amount]);
+        self.0 += amount;
+        Ok(amount)
+    }
 }
 
 impl Data {
@@ -74,68 +103,15 @@ impl Data {
     ///     let stream = data.open();
     /// }
     /// ```
-    pub fn open(mut self) -> DataStream {
-        let buffer = ::std::mem::replace(&mut self.buffer, vec![]);
-        let empty_stream = Cursor::new(vec![]).chain(NetStream::Empty);
-
-        // FIXME: Insert a `BufReader` in front of the `NetStream` with capacity
-        // 4096. We need the new `Chain` methods to get the inner reader to
-        // actually do this, however.
-        let empty_http_stream = HttpReader::SizedReader(empty_stream, 0);
-        let stream = ::std::mem::replace(&mut self.stream, empty_http_stream);
-        DataStream(Cursor::new(buffer).chain(stream))
+    pub fn open(self) -> DataStream {
+        DataStream(0, self)
     }
 
-    // FIXME: This is absolutely terrible (downcasting!), thanks to Hyper.
-    pub(crate) fn from_hyp(mut body: HyperBodyReader) -> Result<Data, &'static str> {
-        // Steal the internal, undecoded data buffer and net stream from Hyper.
-        let (mut hyper_buf, pos, cap) = body.get_mut().take_buf();
-        unsafe { hyper_buf.set_len(cap); }
-        let hyper_net_stream = body.get_ref().get_ref();
-
-        #[cfg(feature = "tls")]
-        #[inline(always)]
-        fn concrete_stream(stream: &&mut NetworkStream) -> Option<NetStream> {
-            stream.downcast_ref::<HttpsStream>()
-                .map(|s| NetStream::Https(s.clone()))
-                .or_else(|| {
-                    stream.downcast_ref::<HttpStream>()
-                        .map(|s| NetStream::Http(s.clone()))
-                })
+    pub(crate) fn from_hyp(body: hyper::Body) -> Data {
+        Data {
+            buffer: vec![],
+            stream: Some(body),
         }
-
-        #[cfg(not(feature = "tls"))]
-        #[inline(always)]
-        fn concrete_stream(stream: &&mut NetworkStream) -> Option<NetStream> {
-            stream.downcast_ref::<HttpStream>()
-                .map(|s| NetStream::Http(s.clone()))
-        }
-
-        // Retrieve the underlying Http(s)Stream from Hyper.
-        let net_stream = match concrete_stream(hyper_net_stream) {
-            Some(net_stream) => net_stream,
-            None => return Err("Stream is not an HTTP(s) stream!")
-        };
-
-        // Set the read timeout to 5 seconds.
-        net_stream.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout set");
-
-        // TODO: Explain this.
-        trace_!("Hyper buffer: [{}..{}] ({} bytes).", pos, cap, cap - pos);
-
-        let mut cursor = Cursor::new(hyper_buf);
-        cursor.set_position(pos as u64);
-        let inner_data = cursor.chain(net_stream);
-
-        // Create an HTTP reader from the stream.
-        let http_stream = match body {
-            SizedReader(_, n) => SizedReader(inner_data, n),
-            EofReader(_) => EofReader(inner_data),
-            EmptyReader(_) => EmptyReader(inner_data),
-            ChunkedReader(_, n) => ChunkedReader(inner_data, n)
-        };
-
-        Ok(Data::new(http_stream))
     }
 
     /// Retrieve the `peek` buffer.
@@ -180,7 +156,7 @@ impl Data {
     /// ```
     #[inline(always)]
     pub fn peek_complete(&self) -> bool {
-        self.is_complete
+        self.stream.is_none()
     }
 
     /// A helper method to write the body of the request to any `Write` type.
@@ -226,7 +202,7 @@ impl Data {
         io::copy(&mut self.open(), &mut File::create(path)?)
     }
 
-    // Creates a new data object with an internal buffer `buf`, where the cursor
+    /*TODO: ? // Creates a new data object with an internal buffer `buf`, where the cursor
     // in the buffer is at `pos` and the buffer has `cap` valid bytes. Thus, the
     // bytes `vec[pos..cap]` are buffered and unread. The remainder of the data
     // bytes can be read from `stream`.
@@ -258,23 +234,14 @@ impl Data {
             stream: stream,
             is_complete: eof,
         }
-    }
+    }*/
 
     /// This creates a `data` object from a local data source `data`.
     #[inline]
     pub(crate) fn local(data: Vec<u8>) -> Data {
-        let empty_stream = Cursor::new(vec![]).chain(NetStream::Empty);
-
         Data {
             buffer: data,
-            stream: HttpReader::SizedReader(empty_stream, 0),
-            is_complete: true,
+            stream: None,
         }
-    }
-}
-
-impl Drop for Data {
-    fn drop(&mut self) {
-        kill_stream(&mut self.stream);
     }
 }

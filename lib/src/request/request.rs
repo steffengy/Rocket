@@ -39,7 +39,7 @@ struct RequestState<'r> {
 pub struct Request<'r> {
     method: Method,
     uri: URI<'r>,
-    headers: HeaderMap<'r>,
+    headers: HeaderMap,
     remote: Option<SocketAddr>,
     state: RequestState<'r>
 }
@@ -206,7 +206,7 @@ impl<'r> Request<'r> {
     /// # });
     /// ```
     #[inline(always)]
-    pub fn headers(&self) -> &HeaderMap<'r> {
+    pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
@@ -231,7 +231,7 @@ impl<'r> Request<'r> {
     /// # });
     /// ```
     #[inline(always)]
-    pub fn add_header<'h: 'r, H: Into<Header<'h>>>(&mut self, header: H) {
+    pub fn add_header<H: Into<Header<'static>>>(&mut self, header: H) {
         self.headers.add(header.into());
     }
 
@@ -257,7 +257,7 @@ impl<'r> Request<'r> {
     /// # });
     /// ```
     #[inline(always)]
-    pub fn replace_header<'h: 'r, H: Into<Header<'h>>>(&mut self, header: H) {
+    pub fn replace_header<H: Into<Header<'static>>>(&mut self, header: H) {
         self.headers.replace(header.into());
     }
 
@@ -568,14 +568,16 @@ impl<'r> Request<'r> {
     pub(crate) fn from_hyp(rocket: &'r Rocket,
                            h_method: hyper::Method,
                            h_headers: hyper::header::Headers,
-                           h_uri: hyper::RequestUri,
+                           h_uri: hyper::Uri,
                            h_addr: SocketAddr,
                            ) -> Result<Request<'r>, String> {
-        // Get a copy of the URI for later use.
-        let uri = match h_uri {
-            hyper::RequestUri::AbsolutePath(s) => s,
-            _ => return Err(format!("Bad URI: {}", h_uri)),
-        };
+
+        // TODO: not sure if that isn't caught by hyper anyways?
+        if !h_uri.scheme().is_none() || !h_uri.authority().is_none() || !h_uri.path().starts_with('/') {
+            return Err(format!("Bad URI: {}", h_uri));
+        }
+        // TODO: modify rockets URI to just wrap hypers
+        let uri = format!("{}", h_uri);
 
         // Ensure that the method is known. TODO: Allow made-up methods?
         let method = match Method::from_hyp(&h_method) {

@@ -68,8 +68,8 @@ impl<T: Read> From<T> for Stream<T> {
 /// If reading from the input stream fails at any point during the response, the
 /// response is abandoned, and the response ends abruptly. An error is printed
 /// to the console with an indication of what went wrong.
-impl<'r, T: Read + 'r> Responder<'r> for Stream<T> {
-    fn respond_to(self, _: &Request) -> Result<Response<'r>, Status> {
+impl<T: Read + Send + 'static> Responder for Stream<T> {
+    fn respond_to(self, _: &Request) -> Result<Response, Status> {
         Response::build().chunked_body(self.0, self.1).ok()
     }
 }

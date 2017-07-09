@@ -90,7 +90,7 @@ pub struct Flash<R> {
     responder: R,
 }
 
-impl<'r, R: Responder<'r>> Flash<R> {
+impl<R: Responder> Flash<R> {
     /// Constructs a new `Flash` message with the given `name`, `msg`, and
     /// underlying `responder`.
     ///
@@ -180,8 +180,8 @@ impl<'r, R: Responder<'r>> Flash<R> {
 /// response. In other words, simply sets a cookie and delagates the rest of the
 /// response handling to the wrapped responder. As a result, the `Outcome` of
 /// the response is the `Outcome` of the wrapped `Responder`.
-impl<'r, R: Responder<'r>> Responder<'r> for Flash<R> {
-    fn respond_to(self, req: &Request) -> Result<Response<'r>, Status> {
+impl<R: Responder> Responder for Flash<R> {
+    fn respond_to(self, req: &Request) -> Result<Response, Status> {
         trace_!("Flash: setting message: {}:{}", self.name, self.message);
         let cookie = self.cookie();
         Response::build_from(self.responder.respond_to(req)?)

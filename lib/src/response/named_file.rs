@@ -79,8 +79,8 @@ impl NamedFile {
 /// [ContentType::from_extension](/rocket/http/struct.ContentType.html#method.from_extension)
 /// for more information. If you would like to stream a file with a different
 /// Content-Type than that implied by its extension, use a `File` directly.
-impl Responder<'static> for NamedFile {
-    fn respond_to(self, _: &Request) -> Result<Response<'static>, Status> {
+impl Responder for NamedFile {
+    fn respond_to(self, _: &Request) -> Result<Response, Status> {
         let mut response = Response::new();
         if let Some(ext) = self.path().extension() {
             // TODO: Use Cow for lowercase.
