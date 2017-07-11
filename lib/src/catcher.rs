@@ -1,11 +1,13 @@
+use std::fmt;
+use yansi::Color::*;
+use futures::Future;
+
 use response;
 use handler::ErrorHandler;
 use codegen::StaticCatchInfo;
 use error::Error;
 use request::Request;
-
-use std::fmt;
-use yansi::Color::*;
+use http::Status;
 
 /// An error catching route.
 ///
@@ -99,8 +101,8 @@ impl Catcher {
     }
 
     #[inline(always)]
-    pub(crate) fn handle<'r>(&self, err: Error, req: &'r Request)
-            -> response::Result {
+    pub(crate) fn handle(&self, err: Error, req: Request)
+            -> impl Future<Item=(Request, response::Response), Error=(Request, Status)> + 'static {
         (self.handler)(err, req)
     }
 
@@ -156,10 +158,10 @@ macro_rules! default_errors {
         let mut map = HashMap::new();
 
         $(
-            fn $fn_name<'r>(_: Error, req: &'r Request) -> response::Result {
-                status::Custom(Status::from_code($code).unwrap(),
+            fn $fn_name(_: Error, req: Request) -> BoxFuture<(Request, response::Response), (Request, Status)> {
+                status::Custom::respond_to(Ok((req, status::Custom(Status::from_code($code).unwrap(),
                     content::HTML(error_page_template!($code, $name, $description))
-                ).respond_to(req)
+                )))).boxed()
             }
 
             map.insert($code, Catcher::new_default($code, $fn_name));
@@ -173,6 +175,9 @@ pub mod defaults {
     use super::Catcher;
 
     use std::collections::HashMap;
+
+    use futures::Future;
+    use futures::future::BoxFuture;
 
     use request::Request;
     use response::{self, content, status, Responder};

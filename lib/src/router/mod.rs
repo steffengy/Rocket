@@ -2,6 +2,7 @@ mod collider;
 mod route;
 
 use std::collections::hash_map::HashMap;
+use std::sync::Arc;
 
 use self::collider::Collider;
 pub use self::route::Route;
@@ -14,7 +15,7 @@ type Selector = Method;
 
 #[derive(Default)]
 pub struct Router {
-    routes: HashMap<Selector, Vec<Route>>, // using 'selector' for now
+    routes: HashMap<Selector, Vec<Arc<Route>>>, // using 'selector' for now
 }
 
 impl Router {
@@ -27,11 +28,11 @@ impl Router {
         let entries = self.routes.entry(selector).or_insert_with(|| vec![]);
         // TODO: We really just want an insertion at the correct spot here,
         // instead of pushing to the end and _then_ sorting.
-        entries.push(route);
+        entries.push(Arc::new(route));
         entries.sort_by(|a, b| a.rank.cmp(&b.rank));
     }
 
-    pub fn route<'b>(&'b self, req: &Request) -> Vec<&'b Route> {
+    pub fn route<'b>(&'b self, req: &Request) -> Vec<&'b Arc<Route>> {
         // Note that routes are presorted by rank on each `add`.
         let matches = self.routes.get(&req.method()).map_or(vec![], |routes| {
             routes.iter()
@@ -49,7 +50,7 @@ impl Router {
         for routes in self.routes.values() {
             for (i, a_route) in routes.iter().enumerate() {
                 for b_route in routes.iter().skip(i + 1) {
-                    if a_route.collides_with(b_route) {
+                    if (*a_route).collides_with(&**b_route) {
                         result = true;
                         error!("{} and {} collide!", a_route, b_route);
                     }
@@ -61,7 +62,7 @@ impl Router {
     }
 
     #[inline]
-    pub fn routes<'a>(&'a self) -> impl Iterator<Item=&'a Route> + 'a {
+    pub fn routes<'a>(&'a self) -> impl Iterator<Item=&'a Arc<Route>> + 'a {
         self.routes.values().flat_map(|v| v.iter())
     }
 }

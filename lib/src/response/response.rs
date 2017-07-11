@@ -1,7 +1,10 @@
 use std::{io, fmt, str};
 use std::borrow::Cow;
 
-use response::Responder;
+use futures::{Future, IntoFuture};
+use futures::future::FutureResult;
+
+use response::{RequestFuture, Responder};
 use http::{Header, HeaderMap, Status, ContentType};
 
 /// The default size, in bytes, of a chunk for streamed responses.
@@ -1175,9 +1178,11 @@ impl fmt::Debug for Response {
 
 use request::Request;
 
-impl Responder for Response {
+impl<F: RequestFuture<Self>> Responder<F> for Response where F::Future: Send {
+    type Future = F::Future;
+
     /// This is the identity implementation. It simply returns `Ok(self)`.
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Ok(self)
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future()
     }
 }

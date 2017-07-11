@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::io;
 use std::ops::{Deref, DerefMut};
 
+use futures::{Future, BoxFuture, IntoFuture};
 use request::Request;
-use response::{Response, Responder};
+use response::{RequestFuture, Response, Responder};
 use http::{Status, ContentType};
 
 /// A file with an associated name; responds with the Content-Type based on the
@@ -79,19 +80,23 @@ impl NamedFile {
 /// [ContentType::from_extension](/rocket/http/struct.ContentType.html#method.from_extension)
 /// for more information. If you would like to stream a file with a different
 /// Content-Type than that implied by its extension, use a `File` directly.
-impl Responder for NamedFile {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        let mut response = Response::new();
-        if let Some(ext) = self.path().extension() {
-            // TODO: Use Cow for lowercase.
-            let ext_string = ext.to_string_lossy().to_lowercase();
-            if let Some(content_type) = ContentType::from_extension(&ext_string) {
-                response.set_header(content_type);
-            }
-        }
+impl<F: RequestFuture<Self>> Responder<F> for NamedFile where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
 
-        response.set_streamed_body(self.take_file());
-        Ok(response)
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().map(|(req, named_file)| {
+            let mut response = Response::new();
+            if let Some(ext) = named_file.path().extension() {
+                // TODO: Use Cow for lowercase.
+                let ext_string = ext.to_string_lossy().to_lowercase();
+                if let Some(content_type) = ContentType::from_extension(&ext_string) {
+                    response.set_header(content_type);
+                }
+            }
+
+            response.set_streamed_body(named_file.take_file());
+            (req, response)
+        }).boxed()
     }
 }
 

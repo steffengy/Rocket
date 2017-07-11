@@ -5,9 +5,11 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::io;
 use std::mem;
+use std::ops::Deref;
 use std::sync::Arc;
-use futures::{self, Async, Future, Stream, Poll};
-use futures::future::{IntoFuture, FutureResult};
+use futures::{self, BoxFuture, Async, Future, Stream, Poll};
+use futures::future::{Either, IntoFuture, FutureResult};
+use futures::stream;
 use futures_cpupool::{CpuFuture, CpuPool};
 use hyper::server::NewService;
 use tokio_core::reactor::Core;
@@ -44,7 +46,103 @@ pub struct Rocket {
 }
 
 #[derive(Clone)]
-struct RocketService(Arc<(Rocket, CpuPool)>);
+struct RocketService {
+    rocket: RocketRc,
+    pool: Arc<CpuPool>,
+}
+
+// TODO: I do not like RocketRC, maybe merge with Rocket
+#[derive(Clone)]
+pub struct RocketRc(pub(crate) Arc<Rocket>);
+
+impl Deref for RocketRc {
+    type Target = Arc<Rocket>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl RocketRc {
+    // TODO: investigate if replacing BoxFuture -> enum is faster/better
+    //       and a bit too much cloning & boxing for my taste (and too many Arcs in public interfaces generally)
+    #[inline]
+    pub(crate) fn dispatch(self,
+                           mut request: Request,
+                           data: Data) -> BoxFuture<(Request, Response), Request> {
+        info!("{}:", request);
+
+        // Do a bit of preprocessing before routing; run the attached fairings.
+        self.preprocess_request(&mut request, &data);
+        self.fairings.handle_request(&mut request, &data);
+
+        // Route the request to get a response.
+        self.route(request, data)
+            .and_then(move |(mut request, outcome)| {
+                match outcome {
+                    Outcome::Success(mut response) => {
+                        // A user's route responded! Set the cookies.
+                        for cookie in request.cookies().delta() {
+                            response.adjoin_header(cookie);
+                        }
+
+                        futures::future::ok((request, response)).boxed()
+                    }
+                    Outcome::Forward(data) => {
+                        // There was no matching route.
+                        if request.method() == Method::Head {
+                            info_!("Autohandling {} request.", Paint::white("HEAD"));
+                            request.set_method(Method::Get);
+                            self.clone().dispatch(request, data).map(|(request, mut response)| {
+                                response.strip_body();
+                                (request, response)
+                            }).boxed()
+                        } else {
+                            self.handle_error(Status::NotFound, request).boxed()
+                        }
+                    }
+                    Outcome::Failure(status) => self.handle_error(status, request).boxed(),
+                }.map(|(req, resp)| (self, req, resp))
+            })
+            .map(move |(rocket, request, mut response)| {
+                // Add the 'rocket' server header to the response and run fairings.
+                // TODO: If removing Hyper, write out `Date` header too.
+                response.set_header(Header::new("Server", "Rocket"));
+                rocket.fairings.handle_response(&request, &mut response);
+                (request, response)
+            })
+            .boxed()
+    }
+
+    // Finds the error catcher for the status `status` and executes it fo the
+    // given request `req`. If a user has registere a catcher for `status`, the
+    // catcher is called. If the catcher fails to return a good response, the
+    // 500 catcher is executed. if there is no registered catcher for `status`,
+    // the default catcher is used.
+    fn handle_error(&self, status: Status, req: Request) -> impl Future<Item=(Request, Response), Error=Request> + 'static {
+        warn_!("Responding with {} catcher.", Paint::red(&status));
+
+        let rocket = self.clone();
+
+        // Try to get the active catcher but fallback to user's 500 catcher.
+        let error = Error::NoRoute;
+        let future = {
+            let catcher = rocket.catchers.get(&status.code).unwrap_or_else(|| {
+                error_!("No catcher found for {}. Using 500 catcher.", status);
+                rocket.catchers.get(&500).expect("500 catcher.")
+            });
+            catcher.handle(error, req)
+        };
+
+        // Dispatch to the user's catcher. If it fails, use the default 500.
+        future.or_else(move |(req, err_status)| {
+            error_!("Catcher failed with status: {}!", err_status);
+            warn_!("Using default 500 error catcher.");
+            let default = rocket.default_catchers.get(&500).expect("Default 500");
+            default.handle(error, req)
+        }).map_err(|_| panic!("Default 500 response."))
+    }
+}
 
 #[doc(hidden)]
 impl hyper::NewService for RocketService {
@@ -63,7 +161,7 @@ impl hyper::Service for RocketService {
     type Request = hyper::Request;
     type Response = hyper::Response;
     type Error = hyper::Error;
-    type Future = CpuFuture<hyper::Response, hyper::Error>;
+    type Future = CpuFuture<Self::Response, Self::Error>;
 
     // This function tries to hide all of the Hyper-ness from Rocket. It
     // essentially converts Hyper types into Rocket types, then calls the
@@ -71,33 +169,32 @@ impl hyper::Service for RocketService {
     // depends on the `HyperResponse` type, this function does the actual
     // response processing.
     fn call(&self, hyp_req: hyper::Request) -> Self::Future {
-        let inner = self.0.clone();
-        (self.0).1.spawn_fn(move || {
-            let rocket = &inner.0;
-
+        let rocket = self.rocket.clone();
+        self.pool.spawn_fn(move || {
             // Get all of the information from Hyper.
             let h_addr = hyp_req.remote_addr().unwrap();
             let (h_method, h_uri, _, h_headers, h_body) = hyp_req.deconstruct();
 
             // Convert the Hyper request into a Rocket request.
-            let req_res = Request::from_hyp(rocket, h_method, h_headers, h_uri, h_addr);
-            let mut req = match req_res {
-                Ok(req) => req,
+            let req_res = Request::from_hyp(rocket.clone(), h_method, h_headers, h_uri, h_addr);
+            let future = match req_res {
+                Ok(req) => {
+                    // Retrieve the data from the hyper body.
+                    let data = Data::from_hyp(h_body);
+                    // Dispatch the request to get a response, then write that response out.
+                    Either::A(rocket.clone().dispatch(req, data))
+                }
                 Err(e) => {
                     error!("Bad incoming request: {}", e);
-                    let dummy = Request::new(rocket, Method::Get, URI::new("<unknown>"));
-                    let r = rocket.handle_error(Status::InternalServerError, &dummy);
-                    return rocket.issue_response(r);
+                    let dummy = Request::new(rocket.clone(), Method::Get, URI::new("<unknown>"));
+                    let r = rocket.handle_error(Status::InternalServerError, dummy);
+                    Either::B(r)
                 }
             };
-
-            // Retrieve the data from the hyper body.
-            let data = Data::from_hyp(h_body);
-
-            // Dispatch the request to get a response, then write that response out.
-            // let req = UnsafeCell::new(req);
-            let response = rocket.dispatch(&mut req, data);
-            rocket.issue_response(response)
+            future
+                .map(|(_, resp)| resp)
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "internal()").into())
+                .and_then(move |resp| rocket.issue_response(resp))
         })
     }
 }
@@ -229,58 +326,6 @@ impl Rocket {
         }
     }
 
-    #[inline]
-    pub(crate) fn dispatch<'s, 'r>(&'s self,
-                                   request: &'r mut Request<'s>,
-                                   data: Data) -> Response {
-        info!("{}:", request);
-
-        // Do a bit of preprocessing before routing; run the attached fairings.
-        self.preprocess_request(request, &data);
-        self.fairings.handle_request(request, &data);
-
-        // Route the request to get a response.
-        let mut response = match self.route(request, data) {
-            Outcome::Success(mut response) => {
-                // A user's route responded! Set the cookies.
-                for cookie in request.cookies().delta() {
-                    response.adjoin_header(cookie);
-                }
-
-                response
-            }
-            Outcome::Forward(data) => {
-                // Rust thinks `request` is still borrowed here, but it's
-                // obviously not (data has nothing to do with it), so we
-                // convince it to give us another mutable reference.
-                // TODO: Use something that is well defined, like UnsafeCell.
-                // But that causes variance issues...so wait for NLL.
-                let request: &'r mut Request<'s> = unsafe {
-                    (&mut *(request as *const _ as *mut _))
-                };
-
-                // There was no matching route.
-                if request.method() == Method::Head {
-                    info_!("Autohandling {} request.", Paint::white("HEAD"));
-                    request.set_method(Method::Get);
-                    let mut response = self.dispatch(request, data);
-                    response.strip_body();
-                    response
-                } else {
-                    self.handle_error(Status::NotFound, request)
-                }
-            }
-            Outcome::Failure(status) => self.handle_error(status, request),
-        };
-
-        // Add the 'rocket' server header to the response and run fairings.
-        // TODO: If removing Hyper, write out `Date` header too.
-        response.set_header(Header::new("Server", "Rocket"));
-        self.fairings.handle_response(request, &mut response);
-
-        response
-    }
-
     /// Tries to find a `Responder` for a given `request`. It does this by
     /// routing the request and calling the handler for each matching route
     /// until one of the handlers returns success or failure, or there are no
@@ -293,54 +338,74 @@ impl Rocket {
     // (ensuring `handler` takes an immutable borrow), any caller to `route`
     // should be able to supply an `&mut` and retain an `&` after the call.
     #[inline]
-    pub(crate) fn route<'s, 'r>(&'s self,
-                                request: &'r Request<'s>,
-                                mut data: Data) -> handler::Outcome {
+    pub(crate) fn route(&self,
+                            req: Request,
+                            mut data: Data) -> impl Future<Item=(Request, handler::Outcome), Error=Request> + 'static {
+
         // Go through the list of matching routes until we fail or succeed.
-        let matches = self.router.route(request);
-        for route in matches {
-            // Retrieve and set the requests parameters.
-            info_!("Matched: {}", route);
-            request.set_route(route);
 
-            // Dispatch the request to the handler.
-            let outcome = (route.handler)(request, data);
+        // TODO: this should really be optimized, we collect all matching routes AND clone the ARC
+        let routes: Vec<_> = self.router.route(&req).into_iter().cloned().collect();
 
-            // Check if the request processing completed or if the request needs
-            // to be forwarded. If it does, continue the loop to try again.
-            info_!("{} {}", Paint::white("Outcome:"), outcome);
-            match outcome {
-                o@Outcome::Success(_) | o @Outcome::Failure(_) => return o,
-                Outcome::Forward(unused_data) => data = unused_data,
-            };
+        struct RoutingFuture {
+            req: Option<Request>,
+            data: Option<Data>,
+            pos: usize,
+            routes: Vec<Arc<Route>>,
+            pending_outcome: Option<BoxFuture<(Request, handler::Outcome), Request>>,
         }
 
-        error_!("No matching routes for {}.", request);
-        Outcome::Forward(data)
-    }
+        impl Future for RoutingFuture {
+            type Item = (Request, handler::Outcome);
+            type Error = Request;
 
-    // Finds the error catcher for the status `status` and executes it fo the
-    // given request `req`. If a user has registere a catcher for `status`, the
-    // catcher is called. If the catcher fails to return a good response, the
-    // 500 catcher is executed. if there is no registered catcher for `status`,
-    // the default catcher is used.
-    fn handle_error<'r>(&self, status: Status, req: &'r Request) -> Response {
-        warn_!("Responding with {} catcher.", Paint::red(&status));
+            fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+                loop {
+                    if let Some(ref mut pending_outcome) = self.pending_outcome {
+                        let (request, outcome) = try_ready!(pending_outcome.poll());
 
-        // Try to get the active catcher but fallback to user's 500 catcher.
-        let catcher = self.catchers.get(&status.code).unwrap_or_else(|| {
-            error_!("No catcher found for {}. Using 500 catcher.", status);
-            self.catchers.get(&500).expect("500 catcher.")
-        });
+                        // Check if the request processing completed or if the request needs
+                        // to be forwarded. If it does, continue the loop to try again.
+                        info_!("{} {}", Paint::white("Outcome:"), outcome);
+                        match outcome {
+                            o @ Outcome::Success(_) | o @ Outcome::Failure(_) => {
+                                // TODO: prevent further polling
+                                return Ok(Async::Ready((request, o)));
+                            }
+                            Outcome::Forward(unused_data) => {
+                                self.data = Some(unused_data);
+                                self.req = Some(request);
+                            }
+                        }
+                    }
+                    
+                    let request = self.req.take().unwrap();
+                    let data = self.data.take().unwrap();
+                    if self.pos < self.routes.len() {
+                        let route = self.routes[self.pos].clone();
+                        self.pos += 1;
+                        // Retrieve and set the requests parameters.
+                        info_!("Matched: {}", route);
+                        let handler = route.handler;
+                        request.set_route(route);
 
-        // Dispatch to the user's catcher. If it fails, use the default 500.
-        let error = Error::NoRoute;
-        catcher.handle(error, req).unwrap_or_else(|err_status| {
-            error_!("Catcher failed with status: {}!", err_status);
-            warn_!("Using default 500 error catcher.");
-            let default = self.default_catchers.get(&500).expect("Default 500");
-            default.handle(error, req).expect("Default 500 response.")
-        })
+                        // Dispatch the request to the handler.
+                        self.pending_outcome = Some(handler(request, data));
+                    } else {
+                        error_!("No matching routes for {}.", request);
+                        return Ok(Async::Ready((request, Outcome::Forward(data))));
+                    }
+                }
+            }
+        }
+
+        RoutingFuture {
+            req: Some(req),
+            data: Some(data),
+            pos: 0,
+            routes,
+            pending_outcome: None,
+        }
     }
 
     /// Create a new `Rocket` application using the configuration information in
@@ -680,9 +745,12 @@ impl Rocket {
 
         let full_addr = format!("{}:{}", self.config.address, self.config.port);
 
-        let pool = CpuPool::new(self.config.workers as usize);
-        let rocket = Arc::new((self, pool));
-        let srv = RocketService(rocket.clone());
+        let pool = Arc::new(CpuPool::new(self.config.workers as usize));
+        let rocket = RocketRc(Arc::new(self));
+        let srv = RocketService {
+            rocket: rocket.clone(),
+            pool
+        };
 
         let bind_addrs = match full_addr.to_socket_addrs() {
             Ok(x) => x,
@@ -800,7 +868,7 @@ impl Rocket {
     /// }
     /// ```
     #[inline(always)]
-    pub fn routes<'a>(&'a self) -> impl Iterator<Item=&'a Route> + 'a {
+    pub fn routes<'a>(&'a self) -> impl Iterator<Item=&'a Arc<Route>> + 'a {
         self.router.routes()
     }
 

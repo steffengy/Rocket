@@ -1,5 +1,7 @@
+use futures::{BoxFuture, Future, IntoFuture};
+
 use request::Request;
-use response::{Response, Responder};
+use response::{Response, Responder, RequestFuture};
 use http::hyper::header;
 use http::Status;
 
@@ -104,11 +106,16 @@ impl Redirect {
 /// Constructs a response with the appropriate status code and the given URL in
 /// the `Location` header field. The body of the response is empty. This
 /// responder does not fail.
-impl Responder for Redirect {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Response::build()
-            .status(self.0)
-            .header(header::Location::new(self.1))
+impl<F: RequestFuture<Self>> Responder<F> for Redirect where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, redirect)| {
+            Response::build()
+            .status(redirect.0)
+            .header(header::Location::new(redirect.1))
             .ok()
+            .map(|resp| (req, resp))
+        }).boxed()
     }
 }

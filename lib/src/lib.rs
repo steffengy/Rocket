@@ -103,7 +103,7 @@
 #[macro_use] extern crate pear;
 #[cfg(feature = "tls")] extern crate rustls;
 #[cfg(feature = "tls")] extern crate tokio_rustls;
-extern crate futures;
+#[macro_use] pub /* DEBUG PUB */ extern crate futures;
 extern crate futures_cpupool;
 extern crate tokio_core;
 extern crate yansi;
@@ -119,6 +119,8 @@ extern crate base64;
 extern crate smallvec;
 extern crate ordermap;
 extern crate isatty;
+
+pub use futures::Future;
 
 #[cfg(test)] #[macro_use] extern crate lazy_static;
 

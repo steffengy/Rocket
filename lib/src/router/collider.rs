@@ -111,8 +111,8 @@ impl Collider for Route {
 // Query collisions work like this:
 //   * If route specifies a query, it only gets request that have queries.
 //   * If route doesn't specify query, requests with & without queries collide.
-impl<'r> Collider<Request<'r>> for Route {
-    fn collides_with(&self, req: &Request<'r>) -> bool {
+impl Collider<Request> for Route {
+    fn collides_with(&self, req: &Request) -> bool {
         self.method == req.method()
             && self.uri.collides_with(req.uri())
             && self.uri.query().map_or(true, |_| req.uri().query().is_some())

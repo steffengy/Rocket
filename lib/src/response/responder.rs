@@ -2,6 +2,9 @@ use std::fs::File;
 use std::io::Cursor;
 use std::fmt;
 
+use futures::{self, BoxFuture, Future, IntoFuture};
+use futures::future::{Either, FutureResult};
+
 use http::{Status, ContentType};
 use response::Response;
 use request::Request;
@@ -165,7 +168,11 @@ use request::Request;
 /// # fn person() -> Person { Person { name: "a".to_string(), age: 20 } }
 /// # fn main() {  }
 /// ```
+
+/*
 pub trait Responder {
+    type Response: Future<Item=(Request, Response), Error=(Request, Status)> + Send + 'static;
+
     /// Returns `Ok` if a `Response` could be generated successfully. Otherwise,
     /// returns an `Err` with a failing `Status`.
     ///
@@ -177,75 +184,142 @@ pub trait Responder {
     /// returned, the error catcher for the given status is retrieved and called
     /// to generate a final error response, which is then written out to the
     /// client.
-    fn respond_to(self, request: &Request) -> Result<Response, Status>;
+    fn respond_to(self, request: Request) -> Self::Response;
+}*/
+
+mod sealed {
+    use super::{Request, Status};
+    use futures::{self, Future, IntoFuture, BoxFuture};
+    use futures::future::FutureResult;
+
+    pub trait Seal: Sized {}
+
+    // TODO: really annoying to use R::Future: Send everywhere, RequestFuture should somehow imply that
+    pub trait RequestFuture<I>: IntoFuture<Item=(Request, I), Error=(Request, Status)> + Seal + Send where Self::Future: Send { }
+    impl<I, S: IntoFuture<Item=(Request, I), Error=(Request, Status)> + Send> RequestFuture<I> for S where S::Future: Send { }
+    impl<I, S: IntoFuture<Item=(Request, I), Error=(Request, Status)> + Send> Seal for S where S::Future: Send { }
+}
+pub use self::sealed::RequestFuture;
+
+pub trait Responder<F: RequestFuture<Self>>: Send + Sized where F::Future: Send {
+    type Future: Future<Item=(Request, Response), Error=(Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future;
 }
 
 /// Returns a response with Content-Type `text/plain` and a fixed-size body
 /// containing the string `self`. Always returns `Ok`.
-impl Responder for &'static str {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Response::build()
+impl<F: RequestFuture<Self>> Responder<F> for &'static str where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, str_)| {
+            Response::build()
             .header(ContentType::Plain)
-            .sized_body(Cursor::new(self))
+            .sized_body(Cursor::new(str_))
             .ok()
+            .map(|resp| (req, resp))
+        }).boxed()
     }
 }
 
 /// Returns a response with Content-Type `text/plain` and a fixed-size body
 /// containing the string `self`. Always returns `Ok`.
-impl Responder for String {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Response::build()
+impl<F: RequestFuture<Self>> Responder<F> for String where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, str_)| {
+            Response::build()
             .header(ContentType::Plain)
-            .sized_body(Cursor::new(self))
+            .sized_body(Cursor::new(str_))
             .ok()
+            .map(|resp| (req, resp))
+        }).boxed()
     }
 }
 
 /// Returns a response with a sized body for the file. Always returns `Ok`.
-impl Responder for File {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Response::build().streamed_body(self).ok()
+impl<F: RequestFuture<Self>> Responder<F> for File where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, str_)| {
+            Response::build().streamed_body(str_).ok()
+                .map(|resp| (req, resp))
+        }).boxed()
     }
 }
 
 /// Returns an empty, default `Response`. Always returns `Ok`.
-impl Responder for () {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Ok(Response::new())
+impl<F: RequestFuture<Self>> Responder<F> for () where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().map(|(req, ())| (req, Response::new())).boxed()
     }
 }
 
 /// If `self` is `Some`, responds with the wrapped `Responder`. Otherwise prints
 /// a warning message and returns an `Err` of `Status::NotFound`.
-impl<R: Responder> Responder for Option<R> {
-    fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        self.map_or_else(|| {
-            warn_!("Response was `None`.");
-            Err(Status::NotFound)
-        }, |r| r.respond_to(req))
+impl<F: RequestFuture<Self>, R: Responder<Result<(Request, R), (Request, Status)>>> Responder<F> for Option<R> 
+    where F::Future: Send + 'static, R::Future: Send + 'static
+{
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, responder)| {
+            match responder {
+                Some(r) => {
+                    Either::A(R::respond_to(Ok((req, r))))
+                }
+                None => {
+                    warn_!("Response was `None`.");
+                    Either::B(futures::future::err((req, Status::NotFound)))
+                }
+            }
+        }).boxed()
     }
 }
 
 /// If `self` is `Ok`, responds with the wrapped `Responder`. Otherwise prints
 /// an error message with the `Err` value returns an `Err` of
 /// `Status::InternalServerError`.
-impl<R: Responder, E: fmt::Debug> Responder for Result<R, E> {
-    default fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        self.map(|r| r.respond_to(req)).unwrap_or_else(|e| {
-            error_!("Response was `Err`: {:?}.", e);
-            Err(Status::InternalServerError)
-        })
+impl<F: RequestFuture<Self>, R: Responder<Result<(Request, R), (Request, Status)>>, E: fmt::Debug + Send> Responder<F> for Result<R, E> 
+    where F::Future: Send + 'static, R::Future: Send + 'static
+{
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    default fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, responders)| {
+            match responders {
+                Ok(r) => Either::A(R::respond_to(Ok((req, r)))),
+                Err(e) => {
+                    error_!("Response was `Err`: {:?}.", e);
+                    Either::B(futures::future::err((req, Status::InternalServerError)))
+                }
+            }
+        }).boxed()
     }
 }
 
 /// Responds with the wrapped `Responder` in `self`, whether it is `Ok` or
 /// `Err`.
-impl<'r, R: Responder, E: Responder + fmt::Debug> Responder for Result<R, E> {
-    fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        match self {
-            Ok(responder) => responder.respond_to(req),
-            Err(responder) => responder.respond_to(req),
-        }
+impl<F, R, E> Responder<F> for Result<R, E> 
+    where F: RequestFuture<Self>,
+          F::Future: Send + 'static,
+          R: Responder<Result<(Request, R), (Request, Status)>> + Sync + Send + 'static,
+          R::Future: Send + 'static,
+          E: Responder<Result<(Request, E), (Request, Status)>> + fmt::Debug + 'static,
+          E::Future: Send + 'static
+{
+    fn respond_to(f: F) -> Self::Future
+    {
+        f.into_future().and_then(|(req, responders)| {
+            match responders {
+                Ok(responder) => Either::A(R::respond_to(Ok((req, responder)))),
+                Err(responder) => Either::B(E::respond_to(Ok((req, responder)))),
+            }
+        }).boxed()
     }
 }

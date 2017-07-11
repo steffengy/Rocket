@@ -1,8 +1,11 @@
 use std::io::Read;
 use std::fmt::{self, Debug};
 
+use futures::{BoxFuture, Future, IntoFuture};
+use futures::future::FutureResult;
+
 use request::Request;
-use response::{Response, Responder, DEFAULT_CHUNK_SIZE};
+use response::{RequestFuture, Response, Responder, DEFAULT_CHUNK_SIZE};
 use http::Status;
 
 /// Streams a response to a client from an arbitrary `Read`er type.
@@ -68,8 +71,13 @@ impl<T: Read> From<T> for Stream<T> {
 /// If reading from the input stream fails at any point during the response, the
 /// response is abandoned, and the response ends abruptly. An error is printed
 /// to the console with an indication of what went wrong.
-impl<T: Read + Send + 'static> Responder for Stream<T> {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Response::build().chunked_body(self.0, self.1).ok()
+impl<F: RequestFuture<Self>, T: Read + Send + 'static> Responder<F> for Stream<T> where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, stream)| {
+            Response::build().chunked_body(stream.0, stream.1).ok()
+            .map(|resp| (req, resp))
+        }).boxed()
     }
 }

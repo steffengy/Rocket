@@ -1,8 +1,10 @@
 //! The types of request and error handlers and their return values.
 
+use futures::{Future, IntoFuture, BoxFuture};
+
 use data::Data;
 use request::Request;
-use response::{self, Response, Responder};
+use response::{self, RequestFuture, Response, Responder};
 use error::Error;
 use http::Status;
 use outcome;
@@ -28,11 +30,20 @@ impl Outcome {
     /// }
     /// ```
     #[inline]
-    pub fn from<T: Responder>(req: &Request, responder: T) -> Outcome {
-        match responder.respond_to(req) {
-            Ok(response) => outcome::Outcome::Success(response),
-            Err(status) => outcome::Outcome::Failure(status)
-        }
+    pub fn from<F, T>(req: Request, f: F) -> impl Future<Item=(Request, Outcome), Error=Request>
+        where F: IntoFuture<Item=T, Error=Status>, F::Future: Send, T: Responder<Result<(Request, T), (Request, Status)>>
+    {
+        f.into_future().then(|ret| match ret {
+            Ok(ret) => Ok((req, ret)),
+            Err(e) => Err(req),
+        }).and_then(|(req, ret)| {
+            T::respond_to(Ok((req, ret))).then(|result| {
+                match result {
+                    Ok((req, response)) => Ok((req, outcome::Outcome::Success(response))),
+                    Err((req, status)) => Ok((req, outcome::Outcome::Failure(status)))
+                }
+            })
+        })
     }
 
     /// Return an `Outcome` of `Failure` with the status code `code`. This is
@@ -80,7 +91,7 @@ impl Outcome {
 }
 
 /// The type of a request handler.
-pub type Handler = for<'r> fn(&'r Request, Data) -> Outcome;
+pub type Handler = fn(Request, Data) -> BoxFuture<(Request, Outcome), Request>;
 
 /// The type of an error handler.
-pub type ErrorHandler = for<'r> fn(Error, &'r Request) -> response::Result;
+pub type ErrorHandler = fn(Error, Request) -> BoxFuture<(Request, response::Response), (Request, Status)>;

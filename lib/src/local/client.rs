@@ -1,4 +1,5 @@
 use {Rocket, Request};
+use rocket::RocketRc;
 use local::LocalRequest;
 use http::Method;
 use http::uri::URI;
@@ -37,7 +38,7 @@ use error::LaunchError;
 /// [`put`]: #method.put
 /// [`post`]: #method.post
 pub struct Client {
-    rocket: Rocket,
+    rocket: RocketRc,
 }
 
 impl Client {
@@ -56,7 +57,7 @@ impl Client {
     /// let client = Client::new(rocket::ignite()).expect("valid rocket");
     /// ```
     #[inline]
-    pub fn new(rocket: Rocket) -> Result<Client, LaunchError> {
+    pub fn new(rocket: RocketRc) -> Result<Client, LaunchError> {
         if let Some(err) = rocket.prelaunch_check() {
             return Err(err);
         }
@@ -99,7 +100,7 @@ impl Client {
     /// let req = client.get("/hello");
     /// ```
     #[inline(always)]
-    pub fn get<'c, 'u: 'c, U: Into<URI<'u>>>(&'c self, uri: U) -> LocalRequest<'c> {
+    pub fn get<U: Into<URI<'static>>>(&self, uri: U) -> LocalRequest {
         self.req(Method::Get, uri)
     }
 
@@ -120,7 +121,7 @@ impl Client {
     /// let req = client.put("/hello");
     /// ```
     #[inline(always)]
-    pub fn put<'c, 'u: 'c, U: Into<URI<'u>>>(&'c self, uri: U) -> LocalRequest<'c> {
+    pub fn put<U: Into<URI<'static>>>(&self, uri: U) -> LocalRequest {
         self.req(Method::Put, uri)
     }
 
@@ -145,7 +146,7 @@ impl Client {
     ///     .header(ContentType::Form);
     /// ```
     #[inline(always)]
-    pub fn post<'c, 'u: 'c, U: Into<URI<'u>>>(&'c self, uri: U) -> LocalRequest<'c> {
+    pub fn post<U: Into<URI<'static>>>(&self, uri: U) -> LocalRequest {
         self.req(Method::Post, uri)
     }
 
@@ -166,8 +167,8 @@ impl Client {
     /// let req = client.delete("/hello");
     /// ```
     #[inline(always)]
-    pub fn delete<'c, 'u: 'c, U>(&'c self, uri: U) -> LocalRequest<'c>
-        where U: Into<URI<'u>>
+    pub fn delete<U>(&self, uri: U) -> LocalRequest
+        where U: Into<URI<'static>>
     {
         self.req(Method::Delete, uri)
     }
@@ -189,8 +190,8 @@ impl Client {
     /// let req = client.options("/hello");
     /// ```
     #[inline(always)]
-    pub fn options<'c, 'u: 'c, U>(&'c self, uri: U) -> LocalRequest<'c>
-        where U: Into<URI<'u>>
+    pub fn options<U>(&self, uri: U) -> LocalRequest
+        where U: Into<URI<'static>>
     {
         self.req(Method::Options, uri)
     }
@@ -212,8 +213,8 @@ impl Client {
     /// let req = client.head("/hello");
     /// ```
     #[inline(always)]
-    pub fn head<'c, 'u: 'c, U>(&'c self, uri: U) -> LocalRequest<'c>
-        where U: Into<URI<'u>>
+    pub fn head<U>(&self, uri: U) -> LocalRequest
+        where U: Into<URI<'static>>
     {
         self.req(Method::Head, uri)
     }
@@ -235,8 +236,8 @@ impl Client {
     /// let req = client.patch("/hello");
     /// ```
     #[inline(always)]
-    pub fn patch<'c, 'u: 'c, U>(&'c self, uri: U) -> LocalRequest<'c>
-        where U: Into<URI<'u>>
+    pub fn patch<U>(&self, uri: U) -> LocalRequest
+        where U: Into<URI<'static>>
     {
         self.req(Method::Patch, uri)
     }
@@ -259,10 +260,10 @@ impl Client {
     /// let req = client.req(Method::Get, "/hello");
     /// ```
     #[inline(always)]
-    pub fn req<'c, 'u: 'c, U>(&'c self, method: Method, uri: U) -> LocalRequest<'c>
-        where U: Into<URI<'u>>
+    pub fn req<U>(&self, method: Method, uri: U) -> LocalRequest
+        where U: Into<URI<'static>>
     {
-        let request = Request::new(&self.rocket, method, uri);
-        LocalRequest::new(&self.rocket, request)
+        let request = Request::new(self.rocket.clone(), method, uri);
+        LocalRequest::new(request)
     }
 }

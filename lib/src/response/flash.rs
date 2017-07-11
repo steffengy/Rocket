@@ -1,9 +1,11 @@
 use std::convert::AsRef;
 
+use futures::{Future, BoxFuture, IntoFuture};
+use futures::future::FutureResult;
 use time::Duration;
 
 use outcome::IntoOutcome;
-use response::{Response, Responder};
+use response::{RequestFuture, Response, Responder};
 use request::{self, Request, FromRequest};
 use http::{Status, Cookie};
 
@@ -90,7 +92,7 @@ pub struct Flash<R> {
     responder: R,
 }
 
-impl<R: Responder> Flash<R> {
+impl<R: Responder<Result<(Request, R), (Request, Status)>>> Flash<R> {
     /// Constructs a new `Flash` message with the given `name`, `msg`, and
     /// underlying `responder`.
     ///
@@ -180,13 +182,25 @@ impl<R: Responder> Flash<R> {
 /// response. In other words, simply sets a cookie and delagates the rest of the
 /// response handling to the wrapped responder. As a result, the `Outcome` of
 /// the response is the `Outcome` of the wrapped `Responder`.
-impl<R: Responder> Responder for Flash<R> {
-    fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        trace_!("Flash: setting message: {}:{}", self.name, self.message);
-        let cookie = self.cookie();
-        Response::build_from(self.responder.respond_to(req)?)
-            .header_adjoin(&cookie)
-            .ok()
+impl<F, R> Responder<F> for Flash<R> 
+    where F: RequestFuture<Self>,
+          F::Future: Send + 'static,
+          R: Responder<Result<(Request, R), (Request, Status)>> + Sync + Send + 'static,
+          R::Future: Send,
+{
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, flash)| {
+            trace_!("Flash: setting message: {}:{}", flash.name, flash.message);
+            let cookie = flash.cookie();
+            R::respond_to(Ok((req, flash.responder))).and_then(move |(req, resp)| {
+                Response::build_from(resp)
+                .header_adjoin(&cookie)
+                .ok()
+                .map(|resp| (req, resp))
+            })
+        }).boxed()
     }
 }
 
@@ -216,10 +230,10 @@ impl Flash<()> {
 ///
 /// The suggested use is through an `Option` and the `FlashMessage` type alias
 /// in `request`: `Option<FlashMessage>`.
-impl<'a, 'r> FromRequest<'a, 'r> for Flash<()> {
+impl FromRequest<'static> for Flash<()> {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> request::Outcome<Self, Self::Error> {
+    fn from_request(request: &Request) -> request::Outcome<Self, Self::Error> {
         trace_!("Flash: attemping to retrieve message.");
         let r = request.cookies().get(FLASH_COOKIE_NAME).ok_or(()).and_then(|cookie| {
             trace_!("Flash: retrieving message: {:?}", cookie);

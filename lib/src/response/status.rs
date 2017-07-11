@@ -10,8 +10,11 @@
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 
+use futures::future::{Either, Future, BoxFuture, IntoFuture};
+use futures::future::FutureResult;
+
 use request::Request;
-use response::{Responder, Response};
+use response::{RequestFuture, Responder, Response};
 use http::hyper::header;
 use http::Status;
 
@@ -40,14 +43,31 @@ pub struct Created<R>(pub String, pub Option<R>);
 /// responder should write the body of the response so that it contains
 /// information about the created resource. If no responder is provided, the
 /// response body will be empty.
-impl<R: Responder> Responder for Created<R> {
-    default fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        let mut build = Response::build();
-        if let Some(responder) = self.1 {
-            build.merge(responder.respond_to(req)?);
-        }
+impl<F: RequestFuture<Self>, R: Responder<Result<(Request, R), (Request, Status)>> + Send + Sync + 'static> Responder<F> for Created<R> 
+    where F::Future: Send + 'static, R::Future: Send
+{
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
 
-        build.status(Status::Created).header(header::Location::new(self.0)).ok()
+    default fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, created)| {
+            let mut build = Response::build();
+            let (loc, responder) = (created.0, created.1);
+
+            let future = if let Some(responder) = responder {
+                Either::A(R::respond_to(Ok((req, responder))).map(|(req, resp)| {
+                    build.merge(resp);
+                    (build, req)
+                }))
+            } else {
+                Either::B(Ok((build, req)).into_future())
+            };
+
+            future.and_then(|(mut build, req)| {
+                build.status(Status::Created).header(header::Location::new(loc)).ok()
+                    .map(|resp| (req, resp))
+            })
+        })
+        .boxed()
     }
 }
 
@@ -55,19 +75,32 @@ impl<R: Responder> Responder for Created<R> {
 /// the response with the `Responder`, the `ETag` header is set conditionally if
 /// a `Responder` is provided that implements `Hash`. The `ETag` header is set
 /// to a hash value of the responder.
-impl<R: Responder + Hash> Responder for Created<R> {
-    fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        let mut hasher = DefaultHasher::default();
-        let mut build = Response::build();
-        if let Some(responder) = self.1 {
-            responder.hash(&mut hasher);
-            let hash = hasher.finish().to_string();
+impl<F: RequestFuture<Self>, R: Responder<Result<(Request, R), (Request, Status)>> + Hash + Send + Sync + 'static> Responder<F> for Created<R> 
+    where F::Future: Send + 'static, R::Future: Send
+{
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, created)| {
+            let mut hasher = DefaultHasher::default();
+            let mut build = Response::build();
+            let (loc, responder) = (created.0, created.1);
 
-            build.merge(responder.respond_to(req)?);
-            build.header(header::ETag(header::EntityTag::strong(hash)));
-        }
+            let future = if let Some(responder) = responder {
+                responder.hash(&mut hasher);
+                let hash = hasher.finish().to_string();
+                Either::A(R::respond_to(Ok((req, responder))).map(|(req, resp)| {
+                    build.merge(resp);
+                    build.header(header::ETag(header::EntityTag::strong(hash)));
+                    (build, req)
+                }))
+            } else {
+                Either::B(Ok((build, req)).into_future())
+            };
 
-        build.status(Status::Created).header(header::Location::new(self.0)).ok()
+            future.and_then(|(mut build, req)| {
+                build.status(Status::Created).header(header::Location::new(loc)).ok()
+                    .map(|resp| (req, resp))
+            })
+        }).boxed()
     }
 }
 
@@ -100,14 +133,28 @@ pub struct Accepted<R>(pub Option<R>);
 
 /// Sets the status code of the response to 202 Accepted. If the responder is
 /// `Some`, it is used to finalize the response.
-impl<R: Responder> Responder for Accepted<R> {
-    fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        let mut build = Response::build();
-        if let Some(responder) = self.0 {
-            build.merge(responder.respond_to(req)?);
-        }
+impl<F: RequestFuture<Self>, R: Responder<Result<(Request, R), (Request, Status)>> + Sync + Send + 'static> Responder<F> for Accepted<R> 
+    where F::Future: Send + 'static, R::Future: Send,
+{
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
 
-        build.status(Status::Accepted).ok()
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, accepted)| {
+            let mut build = Response::build();
+
+            let future = if let Some(responder) = accepted.0 {
+                Either::A(R::respond_to(Ok((req, responder))).map(|(req, resp)| {
+                    build.merge(resp);
+                    (build, req)
+                }))
+            } else {
+                Either::B(Ok((build, req)).into_future())
+            };
+
+            future.and_then(|(mut build, req)| {
+                build.status(Status::Accepted).ok().map(|resp| (req, resp))
+            })
+        }).boxed()
     }
 }
 
@@ -127,9 +174,14 @@ pub struct NoContent;
 
 /// Sets the status code of the response to 204 No Content. The body of the
 /// response will be empty.
-impl Responder for NoContent {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Response::build().status(Status::NoContent).ok()
+impl<F: RequestFuture<Self>> Responder<F> for NoContent where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, no_content)| {
+            Response::build().status(Status::NoContent).ok()
+            .map(|resp| (req, resp))
+        }).boxed()
     }
 }
 
@@ -149,9 +201,14 @@ pub struct Reset;
 
 /// Sets the status code of the response to 205 Reset Content. The body of the
 /// response will be empty.
-impl Responder for Reset {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Response::build().status(Status::ResetContent).ok()
+impl<F: RequestFuture<Self>> Responder<F> for Reset where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, reset)| {
+            Response::build().status(Status::ResetContent).ok()
+            .map(|resp| (req, resp))
+        }).boxed()
     }
 }
 
@@ -171,11 +228,20 @@ impl Responder for Reset {
 pub struct NotFound<R>(pub R);
 
 /// Sets the status code of the response to 404 Not Found.
-impl<R: Responder> Responder for NotFound<R> {
-    fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        Response::build_from(self.0.respond_to(req)?)
-            .status(Status::NotFound)
-            .ok()
+impl<F: RequestFuture<Self>, R: Responder<Result<(Request, R), (Request, Status)>> + 'static> Responder<F> for NotFound<R> 
+    where F::Future: Send + 'static, R::Future: Send
+{
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, not_found)| {
+            R::respond_to(Ok((req, not_found.0))).and_then(|(req, response)| {
+                Response::build_from(response)
+                    .status(Status::NotFound)
+                    .ok()
+                    .map(|resp| (req, resp))
+            })
+        }).boxed()
     }
 }
 
@@ -195,11 +261,22 @@ pub struct Custom<R>(pub Status, pub R);
 
 /// Sets the status code of the response and then delegates the remainder of the
 /// response to the wrapped responder.
-impl<'r, R: Responder> Responder for Custom<R> {
-    fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        Response::build_from(self.1.respond_to(req)?)
-            .status(self.0)
-            .ok()
+impl<F: RequestFuture<Self>, R: Responder<Result<(Request, R), (Request, Status)>> + Sync + Send + 'static> Responder<F> for Custom<R> 
+    where F::Future: Send + 'static, R::Future: Send
+{
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, custom)| {
+            let (status, responder) = (custom.0, custom.1);
+            R::respond_to(Ok((req, responder))).and_then(move |(req, response)| {
+                Response::build_from(response)
+                    .status(status)
+                    .ok()
+                    .map(|resp| (req, resp))
+            })
+        })
+        .boxed()
     }
 }
 

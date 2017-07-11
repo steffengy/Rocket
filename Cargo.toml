@@ -12,6 +12,7 @@ members = [
   "examples/hello_person",
   "examples/query_params",
   "examples/hello_world",
+  "examples/hello_world_async",
   "examples/manual_routes",
   "examples/optional_redirect",
   "examples/redirect",

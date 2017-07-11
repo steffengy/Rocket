@@ -1,5 +1,7 @@
+use std::cell::Ref;
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use router::Route;
 use request::Request;
@@ -208,7 +210,7 @@ impl<S, E> IntoOutcome<S, (Status, E), ()> for Result<S, E> {
 ///
 /// # fn main() { }
 /// ```
-pub trait FromRequest<'a, 'r>: Sized {
+pub trait FromRequest<'a>: Sized {
     /// The associated error to be returned if derivation fails.
     type Error: Debug;
 
@@ -218,29 +220,29 @@ pub trait FromRequest<'a, 'r>: Sized {
     /// the derivation fails in an unrecoverable fashion, `Failure` is returned.
     /// `Forward` is returned to indicate that the request should be forwarded
     /// to other matching routes, if any.
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error>;
+    fn from_request(request: &'a Request) -> Outcome<Self, Self::Error>;
 }
 
-impl<'a, 'r> FromRequest<'a, 'r> for Method {
+impl<'a> FromRequest<'a> for Method {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+    fn from_request(request: &Request) -> Outcome<Self, Self::Error> {
         Success(request.method())
     }
 }
 
-impl<'a, 'r> FromRequest<'a, 'r> for &'a URI<'a> {
+impl<'a> FromRequest<'a> for &'a URI<'a> {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+    fn from_request(request: &'a Request) -> Outcome<Self, Self::Error> {
         Success(request.uri())
     }
 }
 
-impl<'a, 'r> FromRequest<'a, 'r> for &'r Route {
+impl<'a> FromRequest<'a> for Ref<'a, Arc<Route>> {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+    fn from_request(request: &'a Request) -> Outcome<Self, Self::Error> {
         match request.route() {
             Some(route) => Success(route),
             None => Forward(())
@@ -248,18 +250,18 @@ impl<'a, 'r> FromRequest<'a, 'r> for &'r Route {
     }
 }
 
-impl<'a, 'r> FromRequest<'a, 'r> for Cookies<'a> {
+impl<'a> FromRequest<'a> for Cookies<'a> {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+    fn from_request(request: &'a Request) -> Outcome<Self, Self::Error> {
         Success(request.cookies())
     }
 }
 
-impl<'a, 'r> FromRequest<'a, 'r> for &'a Accept {
+impl<'a> FromRequest<'a> for &'a Accept {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+    fn from_request(request: &'a Request) -> Outcome<Self, Self::Error> {
         match request.accept() {
             Some(accept) => Success(accept),
             None => Forward(())
@@ -267,10 +269,10 @@ impl<'a, 'r> FromRequest<'a, 'r> for &'a Accept {
     }
 }
 
-impl<'a, 'r> FromRequest<'a, 'r> for &'a ContentType {
+impl<'a> FromRequest<'a> for &'a ContentType {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+    fn from_request(request: &'a Request) -> Outcome<Self, Self::Error> {
         match request.content_type() {
             Some(content_type) => Success(content_type),
             None => Forward(())
@@ -278,10 +280,10 @@ impl<'a, 'r> FromRequest<'a, 'r> for &'a ContentType {
     }
 }
 
-impl<'a, 'r> FromRequest<'a, 'r> for SocketAddr {
+impl<'a> FromRequest<'a> for SocketAddr {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+    fn from_request(request: &'a Request) -> Outcome<Self, Self::Error> {
         match request.remote() {
             Some(addr) => Success(addr),
             None => Forward(())
@@ -289,10 +291,10 @@ impl<'a, 'r> FromRequest<'a, 'r> for SocketAddr {
     }
 }
 
-impl<'a, 'r, T: FromRequest<'a, 'r>> FromRequest<'a, 'r> for Result<T, T::Error> {
+impl<'a, T: FromRequest<'a>> FromRequest<'a> for Result<T, T::Error> {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+    fn from_request(request: &'a Request) -> Outcome<Self, Self::Error> {
         match T::from_request(request) {
             Success(val) => Success(Ok(val)),
             Failure((_, e)) => Success(Err(e)),
@@ -301,14 +303,13 @@ impl<'a, 'r, T: FromRequest<'a, 'r>> FromRequest<'a, 'r> for Result<T, T::Error>
     }
 }
 
-impl<'a, 'r, T: FromRequest<'a, 'r>> FromRequest<'a, 'r> for Option<T> {
+impl<'a, T: FromRequest<'a>> FromRequest<'a> for Option<T> {
     type Error = ();
 
-    fn from_request(request: &'a Request<'r>) -> Outcome<Self, Self::Error> {
+    fn from_request(request: &'a Request) -> Outcome<Self, Self::Error> {
         match T::from_request(request) {
             Success(val) => Success(Some(val)),
             Failure(_) | Forward(_) => Success(None),
         }
     }
 }
-

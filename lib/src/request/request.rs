@@ -1,14 +1,15 @@
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::net::SocketAddr;
 use std::fmt;
 use std::str;
+use std::sync::Arc;
 
 use yansi::Paint;
 use state::{Container, Storage};
 
 use super::{FromParam, FromSegments, FromRequest, Outcome};
 
-use rocket::Rocket;
+use rocket::{Rocket, RocketRc};
 use router::Route;
 use config::{Config, Limits};
 use http::uri::{URI, Segments};
@@ -18,14 +19,25 @@ use http::{RawStr, ContentType, Accept, MediaType};
 use http::hyper;
 
 #[derive(Clone)]
-struct RequestState<'r> {
-    config: &'r Config,
-    state: &'r Container,
+pub(crate) struct RequestState {
+    pub(crate) rocket: RocketRc,
     params: RefCell<Vec<(usize, usize)>>,
-    route: Cell<Option<&'r Route>>,
+    route: RefCell<Option<Arc<Route>>>,
     cookies: RefCell<CookieJar>,
     accept: Storage<Option<Accept>>,
     content_type: Storage<Option<ContentType>>,
+}
+
+impl RequestState {
+    #[inline]
+    fn config(&self) -> &Config {
+        self.rocket.config()
+    }
+
+    #[inline]
+    fn state(&self) -> &Container {
+        &self.rocket.state
+    }
 }
 
 /// The type of an incoming web request.
@@ -36,31 +48,30 @@ struct RequestState<'r> {
 /// contains all of the information for a given web request except for the body
 /// data. This includes the HTTP method, URI, cookies, headers, and more.
 #[derive(Clone)]
-pub struct Request<'r> {
+pub struct Request {
     method: Method,
-    uri: URI<'r>,
+    uri: URI<'static>,
     headers: HeaderMap,
     remote: Option<SocketAddr>,
-    state: RequestState<'r>
+    pub(crate) state: RequestState
 }
 
-impl<'r> Request<'r> {
+impl<'r> Request {
     /// Create a new `Request` with the given `method` and `uri`. The `uri`
     /// parameter can be of any type that implements `Into<URI>` including
     /// `&str` and `String`; it must be a valid absolute URI.
     #[inline(always)]
-    pub(crate) fn new<'s: 'r, U: Into<URI<'s>>>(rocket: &'r Rocket,
-                                                method: Method,
-                                                uri: U) -> Request<'r> {
+    pub(crate) fn new<U: Into<URI<'static>>>(rocket: RocketRc,
+                                             method: Method,
+                                             uri: U) -> Request {
         Request {
             method: method,
             uri: uri.into(),
             headers: HeaderMap::new(),
             remote: None,
             state: RequestState {
-                config: &rocket.config,
-                state: &rocket.state,
-                route: Cell::new(None),
+                rocket,
+                route: RefCell::new(None),
                 params: RefCell::new(Vec::new()),
                 cookies: RefCell::new(CookieJar::new()),
                 accept: Storage::new(),
@@ -70,9 +81,9 @@ impl<'r> Request<'r> {
     }
 
     #[doc(hidden)]
-    pub fn example<F: Fn(&mut Request)>(method: Method, uri: &str, f: F) {
+    pub fn example<F: Fn(&mut Request)>(method: Method, uri: &'static str, f: F) {
         let rocket = Rocket::custom(Config::development().unwrap(), true);
-        let mut request = Request::new(&rocket, method, uri);
+        let mut request = Request::new(RocketRc(Arc::new(rocket)), method, uri);
         f(&mut request);
     }
 
@@ -145,7 +156,7 @@ impl<'r> Request<'r> {
     /// # });
     /// ```
     #[inline(always)]
-    pub fn set_uri<'u: 'r, U: Into<URI<'u>>>(&mut self, uri: U) {
+    pub fn set_uri<U: Into<URI<'static>>>(&mut self, uri: U) {
         self.uri = uri.into();
         *self.state.params.borrow_mut() = Vec::new();
     }
@@ -284,7 +295,7 @@ impl<'r> Request<'r> {
     pub fn cookies(&self) -> Cookies {
         // FIXME: Can we do better? This is disappointing.
         match self.state.cookies.try_borrow_mut() {
-            Ok(jar) => Cookies::new(jar, self.state.config.secret_key()),
+            Ok(jar) => Cookies::new(jar, self.state.config().secret_key()),
             Err(_) => {
                 error_!("Multiple `Cookies` instances are active at once.");
                 info_!("An instance of `Cookies` must be dropped before another \
@@ -403,8 +414,8 @@ impl<'r> Request<'r> {
     /// let json_limit = request.limits().get("json");
     /// # });
     /// ```
-    pub fn limits(&self) -> &'r Limits {
-        &self.state.config.limits
+    pub fn limits(&self) -> &Limits {
+        &self.state.config().limits
     }
 
     /// Get the presently matched route, if any.
@@ -422,8 +433,13 @@ impl<'r> Request<'r> {
     /// let route = request.route();
     /// # });
     /// ```
-    pub fn route(&self) -> Option<&'r Route> {
-        self.state.route.get()
+    pub fn route<'a>(&'a self) -> Option<Ref<'a, Arc<Route>>> {
+        let route = self.state.route.borrow();
+        if route.is_some() {
+            Some(Ref::map(route, |x| x.as_ref().unwrap()))
+        } else {
+            None
+        }
     }
 
     /// Invokes the request guard implemention for `T`, returning its outcome.
@@ -446,7 +462,7 @@ impl<'r> Request<'r> {
     /// let pool = request.guard::<State<Pool>>()?;
     /// ```
     #[inline(always)]
-    pub fn guard<'a, T: FromRequest<'a, 'r>>(&'a self) -> Outcome<T, T::Error> {
+    pub fn guard<'a, T: FromRequest<'a>>(&'a self) -> Outcome<T, T::Error> {
         T::from_request(self)
     }
 
@@ -547,9 +563,9 @@ impl<'r> Request<'r> {
     /// use may result in out of bounds indexing.
     /// TODO: Figure out the mount path from here.
     #[inline]
-    pub(crate) fn set_route(&self, route: &'r Route) {
-        self.state.route.set(Some(route));
+    pub(crate) fn set_route(&self, route: Arc<Route>) {
         *self.state.params.borrow_mut() = route.get_param_indexes(self.uri());
+        *self.state.route.borrow_mut() = Some(route);
     }
 
     /// Replace all of the cookies in `self` with those in `jar`.
@@ -560,17 +576,17 @@ impl<'r> Request<'r> {
 
     /// Get the managed state T, if it exists. For internal use only!
     #[inline(always)]
-    pub(crate) fn get_state<T: Send + Sync + 'static>(&self) -> Option<&'r T> {
-        self.state.state.try_get()
+    pub(crate) fn get_state<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.state.state().try_get()
     }
 
     /// Convert from Hyper types into a Rocket Request.
-    pub(crate) fn from_hyp(rocket: &'r Rocket,
+    pub(crate) fn from_hyp(rocket: RocketRc,
                            h_method: hyper::Method,
                            h_headers: hyper::header::Headers,
                            h_uri: hyper::Uri,
                            h_addr: SocketAddr,
-                           ) -> Result<Request<'r>, String> {
+                           ) -> Result<Request, String> {
 
         // TODO: not sure if that isn't caught by hyper anyways?
         if !h_uri.scheme().is_none() || !h_uri.authority().is_none() || !h_uri.path().starts_with('/') {
@@ -624,7 +640,7 @@ impl<'r> Request<'r> {
     }
 }
 
-impl<'r> fmt::Debug for Request<'r> {
+impl<'r> fmt::Debug for Request {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("Request")
             .field("method", &self.method)
@@ -635,7 +651,7 @@ impl<'r> fmt::Debug for Request<'r> {
     }
 }
 
-impl<'r> fmt::Display for Request<'r> {
+impl<'r> fmt::Display for Request {
     /// Pretty prints a Request. This is primarily used by Rocket's logging
     /// infrastructure.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

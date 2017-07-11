@@ -1,5 +1,8 @@
+use futures::{Future, BoxFuture, IntoFuture};
+use futures::future::FutureResult;
+
 use request::Request;
-use response::{Response, Responder};
+use response::{RequestFuture, Response, Responder};
 use http::Status;
 
 /// A failing response; simply forwards to the catcher for the given
@@ -7,8 +10,10 @@ use http::Status;
 #[derive(Debug)]
 pub struct Failure(pub Status);
 
-impl Responder for Failure {
-    fn respond_to(self, _: &Request) -> Result<Response, Status> {
-        Err(self.0)
+impl<F: RequestFuture<Self>> Responder<F> for Failure where F::Future: Send + 'static {
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, failure)| Err((req, failure.0))).boxed()
     }
 }

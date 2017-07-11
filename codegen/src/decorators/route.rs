@@ -8,7 +8,7 @@ use utils::*;
 
 use syntax::codemap::{Span, Spanned};
 use syntax::tokenstream::TokenTree;
-use syntax::ast::{Arg, Ident, Stmt, Expr, MetaItem, Path};
+use syntax::ast::{Arg, FunctionRetTy, Ty, TyParamBound, TyKind, Name, Ident, Stmt, Expr, MetaItem, Path};
 use syntax::ext::base::{Annotatable, ExtCtxt};
 use syntax::ext::build::AstBuilder;
 use syntax::parse::token;
@@ -251,17 +251,39 @@ fn generic_route_decorator(known_method: Option<Spanned<Method>>,
     // Generate and emit the wrapping function with the Rocket handler signature.
     let user_fn_name = route.annotated_fn.ident();
     let route_fn_name = user_fn_name.prepend(ROUTE_FN_PREFIX);
+
+    // since specialization doesn't work for that, we need to detect if the function returns a future,
+    // if not we wrap the result T as FutureResult<T, _>
+    let mut wrap_responder = quote_stmt!(ecx, ;);
+    let mut returns_future = false;
+    if let FunctionRetTy::Ty(ref ret_ty) =  route.annotated_fn.decl().output {
+        if let Ty { node: TyKind::ImplTrait(ref bounds), .. } = **ret_ty {
+            returns_future = bounds.iter().any(|bound| {
+                if let TyParamBound::TraitTyParamBound(ref poly, _) = *bound {
+                    let id = poly.trait_ref.path.segments.iter().map(|segment| segment.identifier.name).last();
+                    id == Some(Name::intern("Future"))
+                } else { false }
+            });
+        }
+    }
+    if !returns_future {
+        wrap_responder = quote_stmt!(ecx, 
+            let responder = ::rocket::futures::future::ok(responder);
+        );
+    }
+
     emit_item(&mut output, quote_item!(ecx,
         // Allow the `unreachable_code` lint for those FromParam impls that have
         // an `Error` associated type of !.
         #[allow(unreachable_code)]
-        fn $route_fn_name<'_b>(__req: &'_b ::rocket::Request,  __data: ::rocket::Data)
-                -> ::rocket::handler::Outcome {
+        fn $route_fn_name(__req: ::rocket::Request,  __data: ::rocket::Data)
+                -> Box<::rocket::Future<Item=(::rocket::Request, ::rocket::handler::Outcome), Error=::rocket::Request> + Send + 'static> {
              $param_statements
              $query_statement
              $data_statement
              let responder = $user_fn_name($fn_arguments);
-            ::rocket::handler::Outcome::from(__req, responder)
+             $wrap_responder
+             Box::new(::rocket::handler::Outcome::from(__req, responder))
         }
     ).unwrap());
 

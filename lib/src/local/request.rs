@@ -4,7 +4,10 @@ use std::mem::transmute;
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
 
+use futures::Future;
+
 use {Rocket, Request, Response, Data};
+use rocket::RocketRc;
 use http::{Header, Cookie};
 
 /// A structure representing a local request as created by [`Client`].
@@ -67,19 +70,18 @@ use http::{Header, Cookie};
 /// [`dispatch`]: #method.dispatch
 /// [`mut_dispatch`]: #method.mut_dispatch
 /// [`cloned_dispatch`]: #method.cloned_dispatch
-pub struct LocalRequest<'c> {
-    rocket: &'c Rocket,
-    ptr: *mut Request<'c>,
-    request: Rc<Request<'c>>,
+pub struct LocalRequest {
+    ptr: *mut Request,
+    request: Rc<Request>,
     data: Vec<u8>
 }
 
-impl<'c> LocalRequest<'c> {
+impl LocalRequest {
     #[inline(always)]
-    pub(crate) fn new(rocket: &'c Rocket, request: Request<'c>) -> LocalRequest<'c> {
+    pub(crate) fn new(request: Request) -> LocalRequest {
         let mut req = Rc::new(request);
         let ptr = Rc::get_mut(&mut req).unwrap() as *mut Request;
-        LocalRequest { rocket: rocket, ptr: ptr, request: req, data: vec![] }
+        LocalRequest { ptr: ptr, request: req, data: vec![] }
     }
 
     /// Retrieves the inner `Request` as seen by Rocket.
@@ -94,12 +96,17 @@ impl<'c> LocalRequest<'c> {
     /// let inner_req = req.inner();
     /// ```
     #[inline]
-    pub fn inner(&self) -> &Request<'c> {
+    pub fn inner(&self) -> &Request {
         &*self.request
     }
 
+    #[inline]
+    fn rocket(&self) -> &RocketRc {
+        &self.request.state.rocket
+    }
+
     #[inline(always)]
-    fn request(&mut self) -> &mut Request<'c> {
+    fn request(&mut self) -> &mut Request {
         unsafe { &mut *self.ptr }
     }
 
@@ -249,14 +256,15 @@ impl<'c> LocalRequest<'c> {
     /// let response = client.get("/").dispatch();
     /// ```
     #[inline(always)]
-    pub fn dispatch(mut self) -> LocalResponse<'c> {
-        let req = unsafe { transmute(self.request()) };
-        let response = self.rocket.dispatch(req, Data::local(self.data));
-
-        LocalResponse {
-            _request: self.request,
-            response: response
-        }
+    pub fn dispatch<'a>(mut self) -> impl Future<Item=LocalResponse, Error=()> + 'a {
+        let rocket = self.rocket().clone();
+        let req = Rc::try_unwrap(self.request).unwrap();
+        rocket.dispatch(req, Data::local(self.data)).map(move |(req, response)| {
+            LocalResponse {
+                _request: Rc::new(req),
+                response: response
+            }
+        }).map_err(|_| ())
     }
 
     /// Dispatches the request, returning the response.
@@ -276,54 +284,15 @@ impl<'c> LocalRequest<'c> {
     /// let response_b = req.cloned_dispatch();
     /// ```
     #[inline(always)]
-    pub fn cloned_dispatch(&self) -> LocalResponse<'c> {
+    pub fn cloned_dispatch<'a>(&self) -> impl Future<Item=LocalResponse, Error=()> + 'a {
         let cloned = (*self.request).clone();
-        let mut req = LocalRequest::new(self.rocket, cloned);
+        let mut req = LocalRequest::new(cloned);
         req.data = self.data.clone();
         req.dispatch()
     }
-
-    /// Dispatches the request, returning the response.
-    ///
-    /// This method _does not_ consume or clone `self`. Any changes to the
-    /// request that occur during handling will be visible after this method is
-    /// called. For instance, body data is always consumed after a request is
-    /// dispatched. As such, only the first call to `mut_dispatch` for a given
-    /// `LocalRequest` will contains the original body data.
-    ///
-    /// This method should _only_ be used when either it is known that
-    /// the application will not modify the request, or it is desired to see
-    /// modifications to the request. Prefer to use [`dispatch`] or
-    /// [`cloned_dispatch`] instead
-    ///
-    /// [`dispatch`]: #method.dispatch
-    /// [`cloned_dispatch`]: #method.cloned_dispatch
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use rocket::local::Client;
-    ///
-    /// let client = Client::new(rocket::ignite()).unwrap();
-    ///
-    /// let mut req = client.get("/");
-    /// let response_a = req.mut_dispatch();
-    /// let response_b = req.mut_dispatch();
-    /// ```
-    #[inline(always)]
-    pub fn mut_dispatch(&mut self) -> LocalResponse<'c> {
-        let data = ::std::mem::replace(&mut self.data, vec![]);
-        let req = unsafe { transmute(self.request()) };
-        let response = self.rocket.dispatch(req, Data::local(data));
-
-        LocalResponse {
-            _request: self.request.clone(),
-            response: response
-        }
-    }
 }
 
-impl<'c> fmt::Debug for LocalRequest<'c> {
+impl<'c> fmt::Debug for LocalRequest {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.request, f)
     }
@@ -338,12 +307,12 @@ impl<'c> fmt::Debug for LocalRequest<'c> {
 /// `Response`.
 ///
 /// [`Response`]: /rocket/struct.Response.html
-pub struct LocalResponse<'c> {
-    _request: Rc<Request<'c>>,
+pub struct LocalResponse {
+    _request: Rc<Request>,
     response: Response,
 }
 
-impl<'c> Deref for LocalResponse<'c> {
+impl<'c> Deref for LocalResponse {
     type Target = Response;
 
     #[inline(always)]
@@ -352,14 +321,14 @@ impl<'c> Deref for LocalResponse<'c> {
     }
 }
 
-impl<'c> DerefMut for LocalResponse<'c> {
+impl<'c> DerefMut for LocalResponse {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Response {
         &mut self.response
     }
 }
 
-impl<'c> fmt::Debug for LocalResponse<'c> {
+impl<'c> fmt::Debug for LocalResponse {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&self.response, f)
     }

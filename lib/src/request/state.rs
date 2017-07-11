@@ -118,11 +118,11 @@ impl<'r, T: Send + Sync + 'static> State<'r, T> {
 }
 
 // TODO: Doc.
-impl<'a, 'r, T: Send + Sync + 'static> FromRequest<'a, 'r> for State<'r, T> {
+impl<'r, T: Send + Sync + 'static> FromRequest<'r> for State<'r, T> {
     type Error = ();
 
     #[inline(always)]
-    fn from_request(req: &'a Request<'r>) -> request::Outcome<State<'r, T>, ()> {
+    fn from_request(req: &'r Request) -> request::Outcome<State<T>, ()> {
         match req.get_state::<T>() {
             Some(state) => Outcome::Success(State(state)),
             None => {

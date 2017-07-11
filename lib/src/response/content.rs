@@ -22,8 +22,11 @@
 //! let response = content::HTML("<h1>Hello, world!</h1>");
 //! ```
 
+use futures::{Future, BoxFuture, IntoFuture};
+use futures::future::FutureResult;
+
 use request::Request;
-use response::{Response, Responder};
+use response::{RequestFuture, Response, Responder};
 use http::{Status, ContentType};
 
 /// Sets the Content-Type of a `Responder` to a chosen value.
@@ -46,13 +49,23 @@ pub struct Content<R>(pub ContentType, pub R);
 
 /// Overrides the Content-Type of the response to the wrapped `ContentType` then
 /// delegates the remainder of the response to the wrapped responder.
-impl<'r, R: Responder> Responder for Content<R> {
+impl<F: RequestFuture<Self>, R: Responder<Result<(Request, R), (Request, Status)>> + Sync + Send + 'static> Responder<F> for Content<R> 
+    where F::Future: Send + 'static, R::Future: Send
+{
+    type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
     #[inline(always)]
-    fn respond_to(self, req: &Request) -> Result<Response, Status> {
-        Response::build()
-            .merge(self.1.respond_to(req)?)
-            .header(self.0)
-            .ok()
+    fn respond_to(f: F) -> Self::Future {
+        f.into_future().and_then(|(req, content)| {
+            let (ty, responder) = (content.0, content.1);
+            R::respond_to(Ok((req, responder))).and_then(|(req, resp)| {
+                Response::build()
+                    .merge(resp)
+                    .header(ty)
+                    .ok()
+                    .map(|resp| (req, resp))
+            })
+        }).boxed()
     }
 }
 
@@ -71,9 +84,15 @@ macro_rules! ctrs {
 
             /// Sets the Content-Type of the response then delegates the
             /// remainder of the response to the wrapped responder.
-            impl<R: Responder> Responder for $name<R> {
-                fn respond_to(self, req: &Request) -> Result<Response, Status> {
-                    Content(ContentType::$name, self.0).respond_to(req)
+            impl<F: RequestFuture<Self>, R: Responder<Result<(Request, R), (Request, Status)>> + Sync + Send + 'static> Responder<F> for $name<R> 
+                where F::Future: Send + 'static, R::Future: Send
+            {
+                type Future = BoxFuture<(Request, Response), (Request, Status)>;
+
+                fn respond_to(f: F) -> Self::Future {
+                    f.into_future()
+                     .and_then(|(req, self_)| Content::respond_to(Ok((req, Content(ContentType::$name, self_.0)))))
+                     .boxed()
                 }
             }
         )+
